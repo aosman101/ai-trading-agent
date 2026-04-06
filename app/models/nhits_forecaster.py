@@ -41,14 +41,27 @@ class NHITSForecaster:
         self.model = self._NeuralForecast(models=[base_model], freq=self.freq)
         self.model.fit(train_df)
 
-    def predict_all(self) -> pd.DataFrame:
+    def predict_all(self, frame: pd.DataFrame | None = None) -> pd.DataFrame:
         if self.model is None:
             raise RuntimeError("NHITS model is not trained")
-        forecasts = self.model.predict()
+        forecasts = None
+        if frame is not None:
+            latest_frame = MarketDataService.to_neuralforecast_frame(frame)
+            try:
+                forecasts = self.model.predict(df=latest_frame)
+            except TypeError:
+                try:
+                    forecasts = self.model.predict(latest_frame)
+                except Exception as exc:
+                    logger.warning("NHITS predict(latest_frame) failed, falling back to stored context: %s", exc)
+            except Exception as exc:
+                logger.warning("NHITS predict(df=...) failed, falling back to stored context: %s", exc)
+        if forecasts is None:
+            forecasts = self.model.predict()
         return forecasts.sort_values(["unique_id", "ds"])
 
     def predict_latest(self, frame: pd.DataFrame, symbol: str) -> ModelSignal:
-        forecasts = self.predict_all()
+        forecasts = self.predict_all(frame=frame)
         symbol_forecasts = forecasts[forecasts["unique_id"] == symbol].copy()
         if symbol_forecasts.empty:
             raise ValueError(f"No NHITS forecast available for {symbol}")

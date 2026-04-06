@@ -8,7 +8,7 @@ from app.strategies.base import BaseStrategy
 class BreakoutStrategy(BaseStrategy):
     name = "breakout"
 
-    def generate_series(self, frame: pd.DataFrame, sentiment_score: float = 0.0) -> pd.Series:
+    def generate_series(self, frame: pd.DataFrame, sentiment_score: float | pd.Series = 0.0) -> pd.Series:
         prior_high = frame["rolling_high_20"].shift(1)
         prior_low = frame["rolling_low_20"].shift(1)
 

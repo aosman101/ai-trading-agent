@@ -7,7 +7,10 @@ import pandas as pd
 from app.config import get_settings
 from app.data.market_data import MarketDataService
 from app.types import ModelSignal
+from app.utils.logging import get_logger
 from app.utils.safe_model_io import load_model, save_model
+
+logger = get_logger(__name__)
 
 
 class ITransformerForecaster:
@@ -40,7 +43,20 @@ class ITransformerForecaster:
     def predict_latest(self, frame: pd.DataFrame, symbol: str) -> ModelSignal:
         if self.model is None:
             raise RuntimeError("iTransformer model is not trained")
-        forecasts = self.model.predict().sort_values(["unique_id", "ds"])
+        latest_frame = MarketDataService.to_neuralforecast_frame(frame)
+        forecasts = None
+        try:
+            forecasts = self.model.predict(df=latest_frame)
+        except TypeError:
+            try:
+                forecasts = self.model.predict(latest_frame)
+            except Exception as exc:
+                logger.warning("iTransformer predict(latest_frame) failed, falling back to stored context: %s", exc)
+        except Exception as exc:
+            logger.warning("iTransformer predict(df=...) failed, falling back to stored context: %s", exc)
+        if forecasts is None:
+            forecasts = self.model.predict()
+        forecasts = forecasts.sort_values(["unique_id", "ds"])
         symbol_forecasts = forecasts[forecasts["unique_id"] == symbol]
         value_columns = [column for column in symbol_forecasts.columns if column not in {"unique_id", "ds"}]
         point_column = value_columns[0]

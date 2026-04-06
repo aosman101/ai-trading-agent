@@ -268,8 +268,12 @@ class TradingOrchestrator:
         }
         return len({day for day in distinct_days if day}) >= self.settings.paper_days_required
 
-    def _backtest_metrics_for_symbol(self, symbol: str) -> Dict[str, Dict[str, float]]:
-        results = self.models.backtester.run_for_symbol(symbol)
+    def _backtest_metrics_for_symbol(
+        self,
+        symbol: str,
+        sentiment_score: float | pd.Series = 0.0,
+    ) -> Dict[str, Dict[str, float]]:
+        results = self.models.backtester.run_for_symbol(symbol, sentiment_score=sentiment_score)
         metrics = {}
         for strategy_name, result in results.items():
             metrics[strategy_name] = result.metrics
@@ -335,6 +339,11 @@ class TradingOrchestrator:
 
         texts = self.news_data.collect_text_corpus(symbol)
         finbert_signal = models.finbert.predict_latest(symbol, texts)
+        sentiment_series = self.news_data.sentiment_time_series(
+            symbol,
+            history.index,
+            fallback_latest=finbert_signal.score,
+        )
 
         nhits_signal = models.nhits.predict_latest(history_frame, symbol)
         lightgbm_signal = models.lightgbm.predict_latest(latest_row)
@@ -347,7 +356,7 @@ class TradingOrchestrator:
             except Exception as exc:
                 logger.warning("iTransformer prediction failed for %s: %s", symbol, exc)
 
-        strategy_metrics = self._backtest_metrics_for_symbol(symbol)
+        strategy_metrics = self._backtest_metrics_for_symbol(symbol, sentiment_score=sentiment_series)
         strategy_signals = self._make_strategy_signals(history, sentiment_score=finbert_signal.score)
         selected_strategy = self.strategy_selector.select_best(strategy_signals, strategy_metrics)
 

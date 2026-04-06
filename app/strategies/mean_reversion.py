@@ -8,7 +8,7 @@ from app.strategies.base import BaseStrategy
 class MeanReversionStrategy(BaseStrategy):
     name = "mean_reversion"
 
-    def generate_series(self, frame: pd.DataFrame, sentiment_score: float = 0.0) -> pd.Series:
+    def generate_series(self, frame: pd.DataFrame, sentiment_score: float | pd.Series = 0.0) -> pd.Series:
         long_condition = (
             (frame["price_zscore_20"] < -2.0)
             & (frame["close"] < frame["bb_lower"])

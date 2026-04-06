@@ -11,12 +11,20 @@ class BaseStrategy(ABC):
     name: str = "base"
 
     @abstractmethod
-    def generate_series(self, frame: pd.DataFrame, sentiment_score: float = 0.0) -> pd.Series:
+    def generate_series(
+        self,
+        frame: pd.DataFrame,
+        sentiment_score: float | pd.Series = 0.0,
+    ) -> pd.Series:
         raise NotImplementedError
 
-    def generate_latest(self, frame: pd.DataFrame, sentiment_score: float = 0.0) -> StrategySignal:
+    def generate_latest(
+        self,
+        frame: pd.DataFrame,
+        sentiment_score: float | pd.Series = 0.0,
+    ) -> StrategySignal:
         series = self.generate_series(frame, sentiment_score=sentiment_score)
-        latest = int(series.iloc[-1]) if not series.empty else 0
+        latest = float(series.iloc[-1]) if not series.empty else 0.0
         direction = "flat"
         if latest > 0:
             direction = "long"

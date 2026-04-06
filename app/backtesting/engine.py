@@ -99,7 +99,7 @@ class WalkForwardBacktester:
     def run_for_symbol(
         self,
         symbol: str,
-        sentiment_score: float = 0.0,
+        sentiment_score: float | pd.Series = 0.0,
     ) -> Dict[str, BacktestResult]:
         frame = self.market_data.fetch_symbol_history(symbol)
         evaluation_slices = self._evaluation_slices(len(frame))

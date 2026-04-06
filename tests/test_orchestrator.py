@@ -57,6 +57,12 @@ class FakeNewsData:
     def collect_text_corpus(self, symbol: str):
         return ["bullish setup"]
 
+    def sentiment_time_series(self, symbol: str, index, fallback_latest=None, limit: int = 100):
+        series = pd.Series(0.0, index=index, dtype=float)
+        if fallback_latest is not None and len(series):
+            series.iloc[-1] = float(fallback_latest)
+        return series
+
 
 class FakeRepository:
     def __init__(self):
@@ -192,7 +198,7 @@ class FakePredictor:
 
 
 class FakeBacktester:
-    def run_for_symbol(self, symbol: str):
+    def run_for_symbol(self, symbol: str, sentiment_score=0.0):
         metrics = {
             "momentum": {
                 "sharpe": 1.5,

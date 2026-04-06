@@ -8,7 +8,7 @@ from app.strategies.base import BaseStrategy
 class MomentumStrategy(BaseStrategy):
     name = "momentum"
 
-    def generate_series(self, frame: pd.DataFrame, sentiment_score: float = 0.0) -> pd.Series:
+    def generate_series(self, frame: pd.DataFrame, sentiment_score: float | pd.Series = 0.0) -> pd.Series:
         long_condition = (
             (frame["ema_20"] > frame["ema_50"])
             & (frame["macd"] > frame["macd_signal"])
