@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 
-> Autonomous AI-powered swing trading agent that combines deep learning forecasters, reinforcement learning, and rule-based strategies into a risk-managed ensemble — with paper-trading-first safety by default.
+> Autonomous AI-powered swing trading agent that integrates deep learning forecasters, reinforcement learning, and rule-based strategies into a risk-managed ensemble—with a paper-trading-first safety by default.
 
 ---
 
@@ -81,21 +81,21 @@ Reddit Sentiment ─────────┤
 
 Five rule-based strategies compete for selection via live backtest performance:
 
-- **Momentum** — EMA crossover + RSI + MACD confirmation
-- **Mean Reversion** — Bollinger Band + RSI extremes
-- **Trend Following** — EMA 50/200 alignment + ATR filter
-- **Breakout** — Rolling high/low channel breaks + volume surge
-- **Sentiment** — FinBERT score thresholds
+- **Momentum** — EMA crossover + RSI + MACD confirmation.
+- **Mean Reversion** — Bollinger Band + RSI extremes.
+- **Trend Following** — EMA 50/200 alignment + ATR filter.
+- **Breakout** — Rolling high/low channel breaks + volume surge.
+- **Sentiment** — FinBERT score thresholds.
 
 ## Risk Management
 
-- Position sizing via ATR-based stop distance + TFT interval width
-- Configurable max risk per trade (default 1%)
-- Daily loss limit (default 3%)
-- Portfolio heat cap (default 10%)
-- Max open positions limit
-- Kill switch for emergency halt
-- Stop loss + take profit on every order (bracket orders)
+- Position sizing is determined by ATR-based stop distance and the width of the TFT interval.
+- Configurable maximum risk per trade, with a default setting of 1%.
+- Daily loss limit set to a default of 3%.
+- Portfolio heat cap set to a default of 10%.
+- Maximum limit on the number of open positions.
+- Emergency kill switch for immediate halting of trading.
+- Stop loss and take profit implemented on every order using bracket orders.
 
 ## Quick Start
 
@@ -187,7 +187,7 @@ ai_trading_agent/
 │   ├── rl/             # PPO, DQN agents + trading environment
 │   ├── strategies/     # Rule-based strategies
 │   ├── training/       # Model bootstrap + nightly retrain
-│   └── utils/          # Logging, math, safe model serialization
+│   └── utils/          # Logging, math, safe model serialisation
 ├── tests/              # Unit tests (59 tests)
 ├── scripts/            # Bootstrap + backtest runners
 ├── docs/               # Setup, deployment, live transition guides
@@ -198,16 +198,16 @@ ai_trading_agent/
 
 ## Decision Flow
 
-1. Fetch OHLCV data + compute 30+ technical indicators
-2. Score news/Reddit text with FinBERT
-3. Generate forecasts (NHITS, TFT, LightGBM, iTransformer)
-4. Get RL agent actions (PPO + DQN)
-5. Backtest rule-based strategies, select the best performer
-6. Combine all signals in a dynamically weighted ensemble
-7. Size position using ATR + TFT uncertainty
-8. Submit bracket order (stop loss + take profit)
-9. Log everything to Supabase
-10. Retrain models nightly
+1. Fetch OHLCV data and compute over 30 technical indicators.
+2. Score news and Reddit text using FinBERT.
+3. Generate forecasts with NHITS, TFT, LightGBM, and iTransformer.
+4. Obtain actions from a reinforcement learning agent using PPO and DQN.
+5. Backtest rule-based strategies to identify the best performer.
+6. Combine all signals into a dynamically weighted ensemble.
+7. Size positions using ATR and TFT uncertainty.
+8. Submit bracket orders, including stop loss and take profit.
+9. Log all activities to Supabase.
+10. Retrain models nightly.
 
 ## Safety
 
