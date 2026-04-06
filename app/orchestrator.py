@@ -54,9 +54,17 @@ class TradingOrchestrator:
 
     def _hydrate_model_performance(self) -> None:
         snapshot = self.repository.read_runtime_state("model_performance")
-        for model_name, metrics in snapshot.items():
-            if isinstance(metrics, dict):
-                self.decision_engine.update_model_performance(model_name, metrics)
+        if not snapshot:
+            return
+        for scope, scoped_metrics in snapshot.items():
+            if not isinstance(scoped_metrics, dict):
+                continue
+            if {"accuracy", "sharpe", "calibration", "drawdown"}.intersection(scoped_metrics.keys()):
+                self.decision_engine.update_model_performance(scope, scoped_metrics, scope="global")
+                continue
+            for model_name, metrics in scoped_metrics.items():
+                if isinstance(metrics, dict):
+                    self.decision_engine.update_model_performance(model_name, metrics, scope=scope)
 
     def _build_live_rl_observation(self, frame: pd.DataFrame, live_state: Dict[str, float]) -> np.ndarray:
         work = frame.copy()
@@ -127,21 +135,56 @@ class TradingOrchestrator:
     def _signal_direction_multiplier(direction: str) -> float:
         return {"long": 1.0, "short": -1.0, "flat": 0.0}.get(direction, 0.0)
 
+    def _market_regime(self, history: pd.DataFrame) -> str:
+        if history.empty:
+            return "range_low_vol"
+
+        latest = history.iloc[-1]
+        recent = history.tail(60)
+
+        trend_strength = float(latest.get("trend_strength", 0.0) or 0.0)
+        close_price = float(latest.get("close", 0.0) or 0.0)
+        ema_50 = float(latest.get("ema_50", close_price) or close_price or 1.0)
+        current_vol = float(latest.get("realized_vol_20", 0.0) or 0.0)
+        current_width = float(latest.get("bb_width", 0.0) or 0.0)
+
+        vol_series = recent.get("realized_vol_20")
+        width_series = recent.get("bb_width")
+        vol_baseline = float(vol_series.dropna().median()) if vol_series is not None and not vol_series.dropna().empty else max(current_vol, 1e-6)
+        width_baseline = float(width_series.dropna().median()) if width_series is not None and not width_series.dropna().empty else max(current_width, 1e-6)
+
+        if trend_strength >= 0.02 and close_price >= ema_50:
+            trend_label = "bull_trend"
+        elif trend_strength <= -0.02 and close_price <= ema_50:
+            trend_label = "bear_trend"
+        else:
+            trend_label = "range"
+
+        is_high_vol = (
+            current_vol > max(vol_baseline * 1.1, vol_baseline + 1e-6)
+            or current_width > max(width_baseline * 1.1, width_baseline + 1e-6)
+        )
+        vol_label = "high_vol" if is_high_vol else "low_vol"
+        return f"{trend_label}_{vol_label}"
+
     def _refresh_model_performance(self, symbol: str, history_frame: pd.DataFrame) -> None:
         recent_predictions = self.repository.recent_predictions(
             limit=max(self.settings.model_performance_lookback * 3, 300)
         )
-        per_model_returns: dict[str, list[float]] = {}
-        per_model_accuracy: dict[str, list[float]] = {}
-        per_model_calibration: dict[str, list[float]] = {}
+        per_scope_returns: dict[str, dict[str, list[float]]] = {}
+        per_scope_accuracy: dict[str, dict[str, list[float]]] = {}
+        per_scope_calibration: dict[str, dict[str, list[float]]] = {}
 
         for prediction in recent_predictions:
-            if prediction.get("symbol") != symbol:
+            prediction_symbol = str(prediction.get("symbol", ""))
+            if prediction_symbol != symbol:
                 continue
             realized_return = self._prediction_outcome(history_frame, prediction.get("created_at"))
             if realized_return is None:
                 continue
             payload = prediction.get("payload") or {}
+            market_regime = payload.get("market_regime")
+            scopes = self.decision_engine.prediction_scopes(prediction_symbol, regime=market_regime)
             signals = payload.get("model_signals") or []
             for signal in signals:
                 model_name = str(signal.get("name", "")).strip()
@@ -159,27 +202,30 @@ class TradingOrchestrator:
                 realized_strength = min(abs(realized_return) / 0.02, 1.0)
                 calibration_error = abs(confidence - realized_strength)
 
-                per_model_returns.setdefault(model_name, []).append(signal_return)
-                per_model_accuracy.setdefault(model_name, []).append(accuracy)
-                per_model_calibration.setdefault(model_name, []).append(calibration_error)
+                for scope in scopes:
+                    per_scope_returns.setdefault(scope, {}).setdefault(model_name, []).append(signal_return)
+                    per_scope_accuracy.setdefault(scope, {}).setdefault(model_name, []).append(accuracy)
+                    per_scope_calibration.setdefault(scope, {}).setdefault(model_name, []).append(calibration_error)
 
-        metrics_snapshot: dict[str, dict[str, float]] = {}
-        for model_name, returns in per_model_returns.items():
-            clipped_returns = returns[-self.settings.model_performance_lookback :]
-            accuracy = per_model_accuracy.get(model_name, [])[-self.settings.model_performance_lookback :]
-            calibration = per_model_calibration.get(model_name, [])[-self.settings.model_performance_lookback :]
-            returns_series = pd.Series(clipped_returns, dtype=float)
-            equity_curve = (1.0 + returns_series).cumprod()
-            metrics = {
-                "accuracy": float(np.mean(accuracy)) if accuracy else 0.5,
-                "sharpe": sharpe_ratio(returns_series, periods_per_year=max(len(returns_series), 1)),
-                "calibration": float(np.mean(calibration)) if calibration else 0.5,
-                "drawdown": max_drawdown(equity_curve) if not equity_curve.empty else 0.0,
-                "samples": float(len(clipped_returns)),
-                "avg_edge": float(returns_series.mean()) if not returns_series.empty else 0.0,
-            }
-            self.decision_engine.update_model_performance(model_name, metrics)
-            metrics_snapshot[model_name] = metrics
+        metrics_snapshot: dict[str, dict[str, dict[str, float]]] = {}
+        for scope, model_returns in per_scope_returns.items():
+            metrics_snapshot[scope] = {}
+            for model_name, returns in model_returns.items():
+                clipped_returns = returns[-self.settings.model_performance_lookback :]
+                accuracy = per_scope_accuracy.get(scope, {}).get(model_name, [])[-self.settings.model_performance_lookback :]
+                calibration = per_scope_calibration.get(scope, {}).get(model_name, [])[-self.settings.model_performance_lookback :]
+                returns_series = pd.Series(clipped_returns, dtype=float)
+                equity_curve = (1.0 + returns_series).cumprod()
+                metrics = {
+                    "accuracy": float(np.mean(accuracy)) if accuracy else 0.5,
+                    "sharpe": sharpe_ratio(returns_series, periods_per_year=max(len(returns_series), 1)),
+                    "calibration": float(np.mean(calibration)) if calibration else 0.5,
+                    "drawdown": max_drawdown(equity_curve) if not equity_curve.empty else 0.0,
+                    "samples": float(len(clipped_returns)),
+                    "avg_edge": float(returns_series.mean()) if not returns_series.empty else 0.0,
+                }
+                self.decision_engine.update_model_performance(model_name, metrics, scope=scope)
+                metrics_snapshot[scope][model_name] = metrics
 
         if metrics_snapshot:
             self.repository.write_runtime_state("model_performance", metrics_snapshot)
@@ -309,6 +355,8 @@ class TradingOrchestrator:
                 "explanation": decision.explanation,
                 "payload": {
                     "weights": decision.weights,
+                    "weight_scope": decision.weight_scope,
+                    "market_regime": decision.market_regime,
                     "contributions": decision.contributions,
                     "model_signals": [signal.model_dump() for signal in model_signals],
                     "selected_strategy": selected_strategy.model_dump() if selected_strategy else None,
@@ -329,6 +377,7 @@ class TradingOrchestrator:
         history_frame = history.reset_index(names="ds")
         latest_row = history.iloc[-1]
         latest_price = float(latest_row["close"])
+        market_regime = self._market_regime(history)
         self._refresh_model_performance(symbol, history_frame)
         equity = self.broker.account_equity()
         daily_pnl = self.broker.day_pnl()
@@ -376,6 +425,7 @@ class TradingOrchestrator:
             symbol=symbol,
             model_signals=model_signals,
             selected_strategy=selected_strategy,
+            regime=market_regime,
         )
 
         risk_plan = self.risk_manager.build_trade_plan(
@@ -454,6 +504,8 @@ class TradingOrchestrator:
             "current_portfolio_heat": current_portfolio_heat,
             "current_strategy": decision.selected_strategy,
             "most_influential_model": decision.most_influential_model,
+            "market_regime": decision.market_regime,
+            "weight_scope": decision.weight_scope,
             "last_symbol": symbol,
             "last_error": None,
         }

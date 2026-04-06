@@ -251,5 +251,7 @@ def test_run_cycle_for_symbol_uses_live_state_and_updates_runtime_state():
     assert observation[-1] == pytest.approx(0.0)
     assert "worker_status" not in orchestrator.repository.runtime_state
     assert orchestrator.repository.runtime_state["live_state"]["current_portfolio_heat"] > 0
-    assert orchestrator.repository.runtime_state["model_performance"]["nhits"]["accuracy"] > 0
+    assert orchestrator.repository.runtime_state["model_performance"]["global"]["nhits"]["accuracy"] > 0
+    assert result["decision"]["market_regime"] is not None
+    assert result["decision"]["weight_scope"] is not None
     assert orchestrator.broker.orders

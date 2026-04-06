@@ -45,6 +45,8 @@ async function refreshDashboard() {
     <p>Last Cycle: <strong>${status.last_cycle_at || "n/a"}</strong></p>
     <p>Current Strategy: <strong>${status.current_strategy || "n/a"}</strong></p>
     <p>Most Influential Model: <strong>${status.most_influential_model || "n/a"}</strong></p>
+    <p>Market Regime: <strong>${status.market_regime || "n/a"}</strong></p>
+    <p>Weight Scope: <strong>${status.weight_scope || "n/a"}</strong></p>
     <p>Account Equity: <strong>${status.account_equity}</strong></p>
     <p>Day PnL: <strong>${status.day_pnl}</strong></p>
     <p>Portfolio Heat: <strong>${status.current_portfolio_heat ?? "n/a"}</strong></p>

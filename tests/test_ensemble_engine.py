@@ -37,6 +37,33 @@ class TestCurrentWeights:
         assert abs(sum(weights.values()) - 1.0) < 1e-6
         assert weights["nhits"] > weights["lightgbm"]
 
+    def test_scoped_weights_prefer_symbol_regime_then_fallback(self, engine):
+        engine.update_model_performance(
+            "nhits",
+            {"accuracy": 0.9, "sharpe": 1.6, "calibration": 0.1, "drawdown": 0.05},
+            scope="symbol:AAPL|regime:bull_trend_high_vol",
+        )
+        engine.update_model_performance(
+            "lightgbm",
+            {"accuracy": 0.55, "sharpe": 0.2, "calibration": 0.3, "drawdown": 0.20},
+            scope="global",
+        )
+        weights = engine.current_weights(
+            ["nhits", "lightgbm"],
+            symbol="AAPL",
+            regime="bull_trend_high_vol",
+        )
+        assert weights["nhits"] > weights["lightgbm"]
+
+    def test_fallback_to_symbol_scope_when_regime_scope_missing(self, engine):
+        engine.update_model_performance(
+            "tft",
+            {"accuracy": 0.8, "sharpe": 1.0, "calibration": 0.2, "drawdown": 0.1},
+            scope="symbol:AAPL",
+        )
+        weights = engine.current_weights(["tft", "nhits"], symbol="AAPL", regime="range_low_vol")
+        assert weights["tft"] > weights["nhits"]
+
     def test_minimum_weight_floor(self, engine):
         engine.update_model_performance("bad_model", {"accuracy": 0.0, "sharpe": -2.0, "drawdown": 1.0})
         weights = engine.current_weights(["bad_model", "good_model"])
@@ -94,3 +121,14 @@ class TestCombine:
         decision = engine.combine(symbol="AAPL", model_signals=signals)
         assert "Direction=" in decision.explanation
         assert "score=" in decision.explanation
+
+    def test_combine_records_market_regime_and_scope(self, engine):
+        engine.update_model_performance(
+            "nhits",
+            {"accuracy": 0.9, "sharpe": 1.4, "calibration": 0.1, "drawdown": 0.05},
+            scope="regime:bull_trend_low_vol",
+        )
+        signals = [_model_signal("nhits")]
+        decision = engine.combine(symbol="AAPL", model_signals=signals, regime="bull_trend_low_vol")
+        assert decision.market_regime == "bull_trend_low_vol"
+        assert decision.weight_scope == "regime:bull_trend_low_vol"

@@ -66,6 +66,8 @@ def status() -> JSONResponse:
         "kill_switch": settings.kill_switch,
         "current_strategy": snapshot.get("current_strategy"),
         "most_influential_model": snapshot.get("most_influential_model"),
+        "market_regime": worker_status.get("market_regime"),
+        "weight_scope": worker_status.get("weight_scope"),
         "account_equity": worker_status.get("account_equity", broker.account_equity()),
         "day_pnl": worker_status.get("day_pnl", broker.day_pnl()),
         "open_positions": worker_status.get("open_positions", broker.list_open_positions()),

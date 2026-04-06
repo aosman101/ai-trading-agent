@@ -39,6 +39,8 @@ class EnsembleDecision(BaseModel):
     contributions: Dict[str, float] = Field(default_factory=dict)
     selected_strategy: Optional[str] = None
     most_influential_model: Optional[str] = None
+    market_regime: Optional[str] = None
+    weight_scope: Optional[str] = None
     explanation: str = ""
 
 
