@@ -1,10 +1,21 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, Mapping
+from typing import Dict, Mapping
 
 from app.config import get_settings
 from app.types import EnsembleDecision, RiskPlan
 from app.utils.math_utils import clamp
+
+
+# Regime-based scaling: dampen sizing in unfavourable regimes, boost in favourable ones.
+_REGIME_POSITION_SCALE: Dict[str, float] = {
+    "bull_trend_low_vol": 1.0,
+    "bull_trend_high_vol": 0.70,
+    "bear_trend_low_vol": 0.50,
+    "bear_trend_high_vol": 0.35,
+    "range_low_vol": 0.60,
+    "range_high_vol": 0.45,
+}
 
 
 class RiskManager:
@@ -15,6 +26,26 @@ class RiskManager:
         atr_component = max(atr * self.settings.default_stop_atr_multiplier, price * 0.002)
         interval_component = max(interval_width * 0.5, price * 0.002)
         return max(atr_component, interval_component)
+
+    @staticmethod
+    def _regime_scale(regime: str | None) -> float:
+        if not regime:
+            return 0.60
+        return _REGIME_POSITION_SCALE.get(regime, 0.60)
+
+    @staticmethod
+    def _drawdown_scale(equity: float, peak_equity: float) -> float:
+        """Progressively shrink position size as drawdown deepens."""
+        if peak_equity <= 0:
+            return 1.0
+        dd = 1.0 - (equity / peak_equity)
+        if dd <= 0.03:
+            return 1.0
+        if dd <= 0.06:
+            return 0.60
+        if dd <= 0.10:
+            return 0.30
+        return 0.0  # circuit breaker: no new trades beyond 10% drawdown
 
     def build_trade_plan(
         self,
@@ -27,6 +58,7 @@ class RiskManager:
         current_daily_pnl: float,
         open_positions: Mapping[str, float] | None = None,
         current_open_notional: float = 0.0,
+        peak_equity: float | None = None,
     ) -> RiskPlan:
         open_positions = open_positions or {}
         reasons: list[str] = []
@@ -45,19 +77,31 @@ class RiskManager:
         if decision.direction == "short" and not self.settings.allow_shorting:
             reasons.append("Shorting is disabled in settings")
 
+        # --- Drawdown circuit breaker ---
+        effective_peak = peak_equity if peak_equity and peak_equity > 0 else equity
+        dd_scale = self._drawdown_scale(equity, effective_peak)
+        if dd_scale <= 0.0:
+            reasons.append("Drawdown circuit breaker: equity drawdown exceeds 10%")
+
         stop_distance = self._stop_distance(price=price, atr=atr, interval_width=interval_width)
         risk_budget = equity * self.settings.max_risk_per_trade
         confidence_scale = clamp(decision.confidence, 0.25, 1.0)
         uncertainty_scale = clamp(1.0 - min(interval_width / max(price, 1e-9), 0.80), 0.25, 1.0)
 
-        quantity = int((risk_budget / max(stop_distance, 0.01)) * confidence_scale * uncertainty_scale)
+        # --- Regime-adaptive sizing ---
+        regime_scale = self._regime_scale(decision.market_regime)
+
+        quantity = int(
+            (risk_budget / max(stop_distance, 0.01))
+            * confidence_scale
+            * uncertainty_scale
+            * regime_scale
+            * dd_scale
+        )
         quantity = max(0, quantity)
 
-        if quantity <= 0:
+        if quantity <= 0 and not reasons:
             reasons.append("Calculated quantity is zero after risk sizing")
-        elif quantity < 1:
-            quantity = 0
-            reasons.append("Calculated quantity rounds to zero (sub-share)")
 
         direction_multiplier = 1.0 if decision.direction == "long" else -1.0
         stop_loss = price - (direction_multiplier * stop_distance)
@@ -71,6 +115,7 @@ class RiskManager:
             reasons.append("Stop loss is above entry for long trade")
         elif decision.direction == "short" and stop_loss <= price:
             reasons.append("Stop loss is below entry for short trade")
+
         notional = quantity * price
         projected_heat = ((current_open_notional + notional) / equity) if equity > 0 else 0.0
 
@@ -100,6 +145,8 @@ class RiskManager:
             metadata={
                 "confidence_scale": confidence_scale,
                 "uncertainty_scale": uncertainty_scale,
+                "regime_scale": regime_scale,
+                "drawdown_scale": dd_scale,
                 "interval_width": interval_width,
                 "stop_distance": stop_distance,
                 "current_open_notional": current_open_notional,

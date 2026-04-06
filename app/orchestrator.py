@@ -87,7 +87,10 @@ class TradingOrchestrator:
             "target_up_10",
         }
         feature_columns = [column for column in work.columns if column not in excluded]
-        latest_row = work.dropna().iloc[-1]
+        clean = work.dropna()
+        if clean.empty:
+            raise ValueError("No valid rows available to build RL observation — all rows contain NaN")
+        latest_row = clean.iloc[-1]
         observation = latest_row[feature_columns].astype(float).to_numpy(dtype=np.float32)
         extras = np.array(
             [
@@ -115,21 +118,39 @@ class TradingOrchestrator:
         return parsed.astimezone(timezone.utc)
 
     def _prediction_outcome(self, history_frame: pd.DataFrame, created_at: Any) -> float | None:
+        """Compute a blended multi-horizon return following a prediction.
+
+        Uses 1-bar, 3-bar, and 5-bar forward returns (weighted 0.5/0.3/0.2) to
+        reduce noise from single-bar luck while still rewarding timely signals.
+        """
         timestamp = self._parse_timestamp(created_at)
         if timestamp is None or history_frame.empty:
             return None
 
         ds_values = pd.to_datetime(history_frame["ds"], utc=False)
         search_point = pd.Timestamp(timestamp.date())
-        anchor_idx = ds_values.searchsorted(search_point, side="right") - 1
-        if anchor_idx < 0 or anchor_idx >= len(history_frame) - 1:
+        anchor_idx = int(ds_values.searchsorted(search_point, side="right")) - 1
+        if anchor_idx < 0 or anchor_idx + 1 >= len(history_frame):
             return None
 
         entry_price = float(history_frame.iloc[anchor_idx]["close"])
-        exit_price = float(history_frame.iloc[anchor_idx + 1]["close"])
         if entry_price == 0:
             return None
-        return (exit_price / entry_price) - 1.0
+
+        horizons = [(1, 0.50), (3, 0.30), (5, 0.20)]
+        blended = 0.0
+        total_weight = 0.0
+        for bars, weight in horizons:
+            target_idx = anchor_idx + bars
+            if target_idx >= len(history_frame):
+                continue
+            exit_price = float(history_frame.iloc[target_idx]["close"])
+            blended += weight * ((exit_price / entry_price) - 1.0)
+            total_weight += weight
+
+        if total_weight == 0:
+            return None
+        return blended / total_weight
 
     @staticmethod
     def _signal_direction_multiplier(direction: str) -> float:
@@ -148,10 +169,12 @@ class TradingOrchestrator:
         current_vol = float(latest.get("realized_vol_20", 0.0) or 0.0)
         current_width = float(latest.get("bb_width", 0.0) or 0.0)
 
-        vol_series = recent.get("realized_vol_20")
-        width_series = recent.get("bb_width")
-        vol_baseline = float(vol_series.dropna().median()) if vol_series is not None and not vol_series.dropna().empty else max(current_vol, 1e-6)
-        width_baseline = float(width_series.dropna().median()) if width_series is not None and not width_series.dropna().empty else max(current_width, 1e-6)
+        vol_clean = recent.get("realized_vol_20")
+        vol_clean = vol_clean.dropna() if vol_clean is not None else None
+        width_clean = recent.get("bb_width")
+        width_clean = width_clean.dropna() if width_clean is not None else None
+        vol_baseline = float(vol_clean.median()) if vol_clean is not None and not vol_clean.empty else max(current_vol, 1e-6)
+        width_baseline = float(width_clean.median()) if width_clean is not None and not width_clean.empty else max(current_width, 1e-6)
 
         if trend_strength >= 0.02 and close_price >= ema_50:
             trend_label = "bull_trend"
@@ -216,10 +239,20 @@ class TradingOrchestrator:
                 calibration = per_scope_calibration.get(scope, {}).get(model_name, [])[-self.settings.model_performance_lookback :]
                 returns_series = pd.Series(clipped_returns, dtype=float)
                 equity_curve = (1.0 + returns_series).cumprod()
+                # Apply exponential decay: recent predictions matter more than stale ones.
+                n = len(returns_series)
+                if n > 1:
+                    decay_weights = np.array([0.97 ** (n - 1 - i) for i in range(n)])
+                    decay_weights /= decay_weights.sum()
+                    weighted_accuracy = float(np.dot(decay_weights[:len(accuracy)], accuracy)) if accuracy else 0.5
+                    weighted_calibration = float(np.dot(decay_weights[:len(calibration)], calibration)) if calibration else 0.5
+                else:
+                    weighted_accuracy = float(np.mean(accuracy)) if accuracy else 0.5
+                    weighted_calibration = float(np.mean(calibration)) if calibration else 0.5
                 metrics = {
-                    "accuracy": float(np.mean(accuracy)) if accuracy else 0.5,
-                    "sharpe": sharpe_ratio(returns_series, periods_per_year=max(len(returns_series), 1)),
-                    "calibration": float(np.mean(calibration)) if calibration else 0.5,
+                    "accuracy": weighted_accuracy,
+                    "sharpe": sharpe_ratio(returns_series, periods_per_year=252),
+                    "calibration": weighted_calibration,
                     "drawdown": max_drawdown(equity_curve) if not equity_curve.empty else 0.0,
                     "samples": float(len(clipped_returns)),
                     "avg_edge": float(returns_series.mean()) if not returns_series.empty else 0.0,
@@ -265,7 +298,7 @@ class TradingOrchestrator:
             if price is None:
                 try:
                     price = float(self.market_data.latest_feature_row(open_symbol)["close"])
-                except Exception as exc:
+                except (KeyError, IndexError, ValueError, RuntimeError) as exc:
                     logger.warning("Unable to estimate current price for open position %s: %s", open_symbol, exc)
                     continue
                 latest_prices[open_symbol] = price
@@ -374,6 +407,8 @@ class TradingOrchestrator:
         with self._model_lock:
             models = self.models
         history = self.market_data.fetch_symbol_history(symbol)
+        if history.empty:
+            raise ValueError(f"No market data returned for {symbol} — cannot run cycle")
         history_frame = history.reset_index(names="ds")
         latest_row = history.iloc[-1]
         latest_price = float(latest_row["close"])
@@ -402,7 +437,7 @@ class TradingOrchestrator:
         if models.itransformer is not None:
             try:
                 itransformer_signal = models.itransformer.predict_latest(history_frame, symbol)
-            except Exception as exc:
+            except (RuntimeError, ValueError, KeyError, IndexError) as exc:
                 logger.warning("iTransformer prediction failed for %s: %s", symbol, exc)
 
         strategy_metrics = self._backtest_metrics_for_symbol(symbol, sentiment_score=sentiment_series)
@@ -438,6 +473,7 @@ class TradingOrchestrator:
             current_daily_pnl=daily_pnl,
             open_positions=open_positions,
             current_open_notional=current_open_notional,
+            peak_equity=live_state.get("max_equity"),
         )
 
         self._log_prediction(symbol, decision, model_signals, selected_strategy)

@@ -194,3 +194,55 @@ class TestBuildTradePlan:
         )
         assert plan.notional >= 0
         assert plan.risk_amount >= 0
+
+    def test_drawdown_circuit_breaker_blocks_trade(self, risk_manager):
+        decision = _make_decision(direction="long", confidence=0.85)
+        plan = risk_manager.build_trade_plan(
+            symbol="AAPL",
+            decision=decision,
+            price=150.0,
+            atr=3.0,
+            interval_width=2.0,
+            equity=85_000.0,
+            current_daily_pnl=0.0,
+            peak_equity=100_000.0,
+        )
+        assert plan.approved is False
+        assert any("circuit breaker" in r.lower() for r in plan.reasons)
+
+    def test_drawdown_scales_position_down(self, risk_manager):
+        decision = _make_decision(direction="long", confidence=0.85, market_regime="bull_trend_low_vol")
+        plan_no_dd = risk_manager.build_trade_plan(
+            symbol="AAPL",
+            decision=decision,
+            price=150.0,
+            atr=3.0,
+            interval_width=2.0,
+            equity=100_000.0,
+            current_daily_pnl=0.0,
+            peak_equity=100_000.0,
+        )
+        plan_with_dd = risk_manager.build_trade_plan(
+            symbol="AAPL",
+            decision=decision,
+            price=150.0,
+            atr=3.0,
+            interval_width=2.0,
+            equity=95_000.0,
+            current_daily_pnl=0.0,
+            peak_equity=100_000.0,
+        )
+        assert plan_with_dd.quantity < plan_no_dd.quantity
+
+    def test_regime_scales_bear_smaller_than_bull(self, risk_manager):
+        decision_bull = _make_decision(direction="long", confidence=0.85, market_regime="bull_trend_low_vol")
+        decision_bear = _make_decision(direction="long", confidence=0.85, market_regime="bear_trend_high_vol")
+        plan_bull = risk_manager.build_trade_plan(
+            symbol="AAPL", decision=decision_bull, price=150.0,
+            atr=3.0, interval_width=2.0, equity=100_000.0, current_daily_pnl=0.0,
+        )
+        plan_bear = risk_manager.build_trade_plan(
+            symbol="AAPL", decision=decision_bear, price=150.0,
+            atr=3.0, interval_width=2.0, equity=100_000.0, current_daily_pnl=0.0,
+        )
+        assert plan_bear.quantity < plan_bull.quantity

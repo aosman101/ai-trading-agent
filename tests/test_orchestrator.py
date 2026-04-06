@@ -255,3 +255,66 @@ def test_run_cycle_for_symbol_uses_live_state_and_updates_runtime_state():
     assert result["decision"]["market_regime"] is not None
     assert result["decision"]["weight_scope"] is not None
     assert orchestrator.broker.orders
+
+
+def test_run_cycle_for_symbol_raises_on_empty_history():
+    orchestrator = _build_orchestrator()
+
+    class EmptyMarketData:
+        def fetch_symbol_history(self, symbol: str):
+            return pd.DataFrame()
+
+        def latest_feature_row(self, symbol: str):
+            return pd.Series()
+
+    orchestrator.market_data = EmptyMarketData()
+    with pytest.raises(ValueError, match="No market data"):
+        orchestrator.run_cycle_for_symbol("AAPL")
+
+
+def test_build_live_rl_observation_raises_on_all_nan():
+    orchestrator = _build_orchestrator()
+    frame = _history_frame().reset_index(names="ds")
+    # Set all feature columns to NaN
+    for col in frame.columns:
+        if col not in {"symbol", "ds", "open", "high", "low", "close", "adj_close",
+                       "volume", "forward_return_1", "forward_return_5", "forward_return_10",
+                       "target_up_1", "target_up_5", "target_up_10"}:
+            frame[col] = float("nan")
+    live_state = {"current_position": 0.0, "portfolio_value": 1.0, "drawdown": 0.0}
+    with pytest.raises(ValueError, match="No valid rows"):
+        orchestrator._build_live_rl_observation(frame, live_state)
+
+
+def test_prediction_outcome_multi_horizon():
+    orchestrator = _build_orchestrator()
+    frame = _history_frame().reset_index(names="ds")
+    # Use a date that falls on the 2nd row (2024-01-03)
+    result = orchestrator._prediction_outcome(frame, "2024-01-03T16:00:00+00:00")
+    assert result is not None
+    # Should be a blended return, not just single-bar
+    single_bar_return = (106 / 104) - 1.0  # bars 2->3
+    assert result != pytest.approx(single_bar_return, abs=1e-6)
+
+
+def test_market_regime_empty_history():
+    orchestrator = _build_orchestrator()
+    result = orchestrator._market_regime(pd.DataFrame())
+    assert result == "range_low_vol"
+
+
+def test_run_cycle_logs_error_on_symbol_failure():
+    orchestrator = _build_orchestrator()
+
+    class FailingMarketData:
+        def fetch_symbol_history(self, symbol: str):
+            raise RuntimeError("API down")
+
+        def latest_feature_row(self, symbol: str):
+            raise RuntimeError("API down")
+
+    orchestrator.market_data = FailingMarketData()
+    results = orchestrator.run_cycle(["AAPL"])
+    assert results == []
+    assert len(orchestrator.repository.learning_events) == 1
+    assert orchestrator.repository.learning_events[0]["event_type"] == "cycle_error"

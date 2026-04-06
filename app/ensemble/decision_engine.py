@@ -58,12 +58,21 @@ class EnsembleDecisionEngine:
         sharpe = sum(item.get("sharpe", 0.0) for item in history) / len(history)
         calibration = sum(item.get("calibration", 0.5) for item in history) / len(history)
         drawdown = sum(item.get("drawdown", 0.0) for item in history) / len(history)
+        avg_edge = sum(item.get("avg_edge", 0.0) for item in history) / len(history)
+        samples = sum(item.get("samples", 0) for item in history)
+
         score = (
-            0.40 * clamp(accuracy, 0.0, 1.0)
-            + 0.35 * clamp((sharpe + 1.0) / 3.0, 0.0, 1.0)
+            0.35 * clamp(accuracy, 0.0, 1.0)
+            + 0.30 * clamp((sharpe + 1.0) / 3.0, 0.0, 1.0)
             + 0.15 * clamp(1.0 - calibration, 0.0, 1.0)
             + 0.10 * clamp(1.0 - drawdown, 0.0, 1.0)
+            + 0.10 * clamp((avg_edge + 0.02) / 0.04, 0.0, 1.0)
         )
+
+        # Penalise models with very few samples — don't let them dominate.
+        if samples < 20:
+            score *= clamp(samples / 20.0, 0.3, 1.0)
+
         return max(score, 0.05)
 
     def _resolved_scores(
@@ -130,7 +139,27 @@ class EnsembleDecisionEngine:
             contributions[f"strategy:{selected_strategy.strategy}"] = strategy_contribution
 
         weighted_score = float(sum(contributions.values()))
-        confidence = sigmoid(abs(weighted_score) * 3.0)
+
+        # Agreement / disagreement analysis across model signals.
+        directions = [s.direction for s in model_signals if s.direction != "flat"]
+        n_long = sum(1 for d in directions if d == "long")
+        n_short = sum(1 for d in directions if d == "short")
+        n_active = n_long + n_short
+        if n_active > 0:
+            agreement_ratio = max(n_long, n_short) / n_active
+        else:
+            agreement_ratio = 0.0
+
+        # Scale confidence: boost when models agree, dampen when they conflict.
+        raw_confidence = sigmoid(abs(weighted_score) * 3.0)
+        if agreement_ratio >= 0.75:
+            confidence = raw_confidence * clamp(0.90 + 0.10 * agreement_ratio, 0.90, 1.0)
+        elif agreement_ratio <= 0.55 and n_active >= 3:
+            # Strong disagreement — shrink confidence toward the flat threshold.
+            confidence = raw_confidence * 0.70
+        else:
+            confidence = raw_confidence
+        confidence = clamp(confidence, 0.0, 1.0)
 
         direction = "flat"
         if confidence >= self.settings.min_confidence_to_trade and weighted_score > 0:

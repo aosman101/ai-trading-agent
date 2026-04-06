@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import feedparser
@@ -43,7 +43,7 @@ class NewsDataService:
                 }
                 for item in rows[:limit]
             ]
-        except Exception as exc:
+        except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as exc:
             logger.warning("Alpha Vantage news fetch failed for %s: %s", symbol, exc)
             return []
 
@@ -55,17 +55,15 @@ class NewsDataService:
             try:
                 feed = feedparser.parse(url)
                 for entry in feed.entries[:limit]:
-                    items.append(
-                    {
+                    items.append({
                         "title": entry.get("title", ""),
                         "summary": entry.get("summary", ""),
                         "source": feed.feed.get("title", "rss"),
                         "published_at": entry.get("published", ""),
                         "url": entry.get("link", ""),
                         "sentiment_score": None,
-                    }
-                )
-            except Exception as exc:
+                    })
+            except (ValueError, KeyError, AttributeError) as exc:
                 logger.warning("RSS news fetch failed for %s: %s", symbol, exc)
         return items[:limit]
 
@@ -93,13 +91,13 @@ class NewsDataService:
                         "title": submission.title,
                         "summary": submission.selftext[:1000],
                         "source": f"reddit:{submission.subreddit.display_name}",
-                        "published_at": datetime.utcfromtimestamp(submission.created_utc).isoformat(),
+                        "published_at": datetime.fromtimestamp(submission.created_utc, tz=timezone.utc).isoformat(),
                         "url": submission.url,
                         "sentiment_score": None,
                     }
                 )
             return posts
-        except Exception as exc:
+        except (ValueError, KeyError, AttributeError, OSError) as exc:
             logger.warning("Reddit fetch failed for %s: %s", query, exc)
             return []
 
@@ -180,7 +178,7 @@ class NewsDataService:
         if daily_scores:
             score_frame = pd.DataFrame(daily_scores, columns=["date", "score"])
             daily = score_frame.groupby("date", sort=True)["score"].mean().sort_index()
-            aligned = daily.reindex(normalized_index, method="ffill").fillna(0.0)
+            aligned = daily.reindex(normalized_index).ffill().fillna(0.0)
             sentiment_series = pd.Series(aligned.to_numpy(), index=dt_index, dtype=float)
         else:
             sentiment_series = pd.Series(0.0, index=dt_index, dtype=float)

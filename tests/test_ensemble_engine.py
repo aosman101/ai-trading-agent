@@ -58,7 +58,7 @@ class TestCurrentWeights:
     def test_fallback_to_symbol_scope_when_regime_scope_missing(self, engine):
         engine.update_model_performance(
             "tft",
-            {"accuracy": 0.8, "sharpe": 1.0, "calibration": 0.2, "drawdown": 0.1},
+            {"accuracy": 0.8, "sharpe": 1.0, "calibration": 0.2, "drawdown": 0.1, "samples": 50, "avg_edge": 0.005},
             scope="symbol:AAPL",
         )
         weights = engine.current_weights(["tft", "nhits"], symbol="AAPL", regime="range_low_vol")
@@ -132,3 +132,43 @@ class TestCombine:
         decision = engine.combine(symbol="AAPL", model_signals=signals, regime="bull_trend_low_vol")
         assert decision.market_regime == "bull_trend_low_vol"
         assert decision.weight_scope == "regime:bull_trend_low_vol"
+
+    def test_agreement_boosts_confidence(self, engine):
+        unanimous = [
+            _model_signal("a", direction="long", score=0.3, confidence=0.6),
+            _model_signal("b", direction="long", score=0.3, confidence=0.6),
+            _model_signal("c", direction="long", score=0.3, confidence=0.6),
+            _model_signal("d", direction="long", score=0.3, confidence=0.6),
+        ]
+        mixed = [
+            _model_signal("a", direction="long", score=0.3, confidence=0.6),
+            _model_signal("b", direction="short", score=-0.3, confidence=0.6),
+            _model_signal("c", direction="long", score=0.3, confidence=0.6),
+            _model_signal("d", direction="short", score=-0.3, confidence=0.6),
+        ]
+        dec_unanimous = engine.combine(symbol="AAPL", model_signals=unanimous)
+        dec_mixed = engine.combine(symbol="AAPL", model_signals=mixed)
+        assert dec_unanimous.confidence > dec_mixed.confidence
+
+    def test_disagreement_dampens_toward_flat(self, engine):
+        conflicting = [
+            _model_signal("a", direction="long", score=0.2, confidence=0.55),
+            _model_signal("b", direction="short", score=-0.2, confidence=0.55),
+            _model_signal("c", direction="long", score=0.2, confidence=0.55),
+            _model_signal("d", direction="short", score=-0.15, confidence=0.50),
+        ]
+        decision = engine.combine(symbol="AAPL", model_signals=conflicting)
+        assert decision.direction == "flat"
+
+    def test_low_sample_model_gets_lower_weight(self, engine):
+        engine.update_model_performance(
+            "new_model",
+            {"accuracy": 0.95, "sharpe": 2.0, "calibration": 0.05, "drawdown": 0.01, "samples": 5, "avg_edge": 0.01},
+        )
+        engine.update_model_performance(
+            "proven_model",
+            {"accuracy": 0.70, "sharpe": 1.0, "calibration": 0.20, "drawdown": 0.10, "samples": 100, "avg_edge": 0.005},
+        )
+        weights = engine.current_weights(["new_model", "proven_model"])
+        # Despite better accuracy/sharpe, the low-sample model should not dominate.
+        assert weights["new_model"] < 0.70
