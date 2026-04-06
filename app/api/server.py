@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,15 +46,34 @@ def health() -> dict[str, str]:
 @app.get("/api/status")
 def status() -> JSONResponse:
     snapshot = repository.dashboard_snapshot()
+    worker_status = snapshot.get("worker_status") or {}
+    last_cycle_at = worker_status.get("last_cycle_at")
+    worker_healthy = False
+    if last_cycle_at:
+        try:
+            parsed = datetime.fromisoformat(str(last_cycle_at).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            worker_healthy = (
+                (datetime.now(timezone.utc) - parsed).total_seconds()
+                <= settings.worker_heartbeat_tolerance_minutes * 60
+            )
+        except ValueError:
+            worker_healthy = False
     payload = {
         "trading_mode": settings.trading_mode,
         "live_enabled": settings.enable_live_trading,
         "kill_switch": settings.kill_switch,
         "current_strategy": snapshot.get("current_strategy"),
         "most_influential_model": snapshot.get("most_influential_model"),
-        "account_equity": broker.account_equity(),
-        "day_pnl": broker.day_pnl(),
-        "open_positions": broker.list_open_positions(),
+        "account_equity": worker_status.get("account_equity", broker.account_equity()),
+        "day_pnl": worker_status.get("day_pnl", broker.day_pnl()),
+        "open_positions": worker_status.get("open_positions", broker.list_open_positions()),
+        "current_portfolio_heat": worker_status.get("current_portfolio_heat"),
+        "worker_healthy": worker_healthy,
+        "last_cycle_at": last_cycle_at,
+        "last_cycle_symbols": worker_status.get("last_cycle_symbols", []),
+        "last_error": worker_status.get("last_error"),
     }
     return JSONResponse(payload)
 

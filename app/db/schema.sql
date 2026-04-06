@@ -49,3 +49,9 @@ create table if not exists model_weights (
     created_at timestamptz default now(),
     payload jsonb
 );
+
+create table if not exists runtime_state (
+    state_key text primary key,
+    updated_at timestamptz default now(),
+    payload jsonb
+);

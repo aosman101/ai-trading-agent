@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     model_performance_window: int = 100
     strategy_performance_window: int = 60
     paper_days_required: int = 30
+    model_performance_lookback: int = 120
+    worker_heartbeat_tolerance_minutes: int = 90
+    backtest_min_history_bars: int = 252
+    backtest_test_window_bars: int = 63
 
     @field_validator("trading_mode")
     @classmethod

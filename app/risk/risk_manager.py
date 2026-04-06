@@ -26,9 +26,11 @@ class RiskManager:
         equity: float,
         current_daily_pnl: float,
         open_positions: Mapping[str, float] | None = None,
+        current_open_notional: float = 0.0,
     ) -> RiskPlan:
         open_positions = open_positions or {}
         reasons: list[str] = []
+        notes: list[str] = []
 
         if self.settings.kill_switch:
             reasons.append("Kill switch is enabled")
@@ -70,13 +72,18 @@ class RiskManager:
         elif decision.direction == "short" and stop_loss <= price:
             reasons.append("Stop loss is below entry for short trade")
         notional = quantity * price
+        projected_heat = ((current_open_notional + notional) / equity) if equity > 0 else 0.0
 
-        if equity > 0 and (notional / equity) > self.settings.max_portfolio_heat:
-            capped_qty = int((equity * self.settings.max_portfolio_heat) / max(price, 0.01))
+        if equity > 0 and projected_heat > self.settings.max_portfolio_heat:
+            remaining_notional = max((equity * self.settings.max_portfolio_heat) - current_open_notional, 0.0)
+            capped_qty = int(remaining_notional / max(price, 0.01))
             quantity = max(0, capped_qty)
             notional = quantity * price
             if quantity == 0:
                 reasons.append("Portfolio heat cap reduced quantity to zero")
+            else:
+                notes.append("Portfolio heat cap reduced position size")
+            projected_heat = ((current_open_notional + notional) / equity) if equity > 0 else 0.0
 
         approved = len(reasons) == 0
         return RiskPlan(
@@ -95,5 +102,8 @@ class RiskManager:
                 "uncertainty_scale": uncertainty_scale,
                 "interval_width": interval_width,
                 "stop_distance": stop_distance,
+                "current_open_notional": current_open_notional,
+                "projected_portfolio_heat": projected_heat,
+                "notes": notes,
             },
         )

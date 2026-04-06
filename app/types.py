@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+from app.utils.time import utc_now
 
 
 Direction = Literal["long", "short", "flat"]
@@ -16,7 +17,7 @@ class ModelSignal(BaseModel):
     score: float = 0.0
     confidence: float = 0.0
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class StrategySignal(BaseModel):
@@ -65,11 +66,11 @@ class TradeRecord(BaseModel):
     strategy: Optional[str] = None
     model_weights: Dict[str, float] = Field(default_factory=dict)
     status: str = "submitted"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class LearningEvent(BaseModel):
     event_type: str
     message: str
     payload: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)

@@ -51,6 +51,22 @@ class WalkForwardBacktester:
         size_multiplier = position_change.abs().clip(0.0, 1.0)
         return (base_slippage_bps / 10_000.0) * vol_multiplier * size_multiplier
 
+    def _evaluation_slices(self, n_rows: int) -> list[slice]:
+        min_history = max(30, self.settings.backtest_min_history_bars)
+        test_window = max(10, self.settings.backtest_test_window_bars)
+        if n_rows <= min_history:
+            return [slice(0, n_rows)]
+
+        windows: list[slice] = []
+        start = min_history
+        while start < n_rows:
+            end = min(start + test_window, n_rows)
+            windows.append(slice(start, end))
+            if end >= n_rows:
+                break
+            start += test_window
+        return windows or [slice(0, n_rows)]
+
     def _simulate_strategy(
         self,
         frame: pd.DataFrame,
@@ -86,10 +102,31 @@ class WalkForwardBacktester:
         sentiment_score: float = 0.0,
     ) -> Dict[str, BacktestResult]:
         frame = self.market_data.fetch_symbol_history(symbol)
+        evaluation_slices = self._evaluation_slices(len(frame))
         results: dict[str, BacktestResult] = {}
         for strategy in self.strategies:
             signals = strategy.generate_series(frame, sentiment_score=sentiment_score)
-            result = self._simulate_strategy(frame, signals)
+            returns_segments: list[pd.Series] = []
+            position_segments: list[pd.Series] = []
+            for evaluation_slice in evaluation_slices:
+                segment_frame = frame.iloc[evaluation_slice].copy()
+                segment_signals = signals.iloc[evaluation_slice].copy()
+                segment_result = self._simulate_strategy(segment_frame, segment_signals)
+                returns_segments.append(segment_result.returns)
+                position_segments.append(segment_result.position)
+
+            strategy_returns = pd.concat(returns_segments).sort_index()
+            position = pd.concat(position_segments).sort_index()
+            equity_curve = (1.0 + strategy_returns).cumprod()
+            metrics = summarize_performance(strategy_returns, position)
+            result = BacktestResult(
+                symbol=str(frame["symbol"].iloc[-1]),
+                strategy=strategy.name,
+                metrics=metrics,
+                equity_curve=equity_curve,
+                returns=strategy_returns,
+                position=position,
+            )
             result.strategy = strategy.name
             results[strategy.name] = result
         return results
