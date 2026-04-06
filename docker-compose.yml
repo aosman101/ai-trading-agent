@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: ai-trading-agent-api
+    command: uvicorn app.api.server:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    volumes:
+      - ./artifacts:/app/artifacts
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: ai-trading-agent-worker
+    command: python -m app.worker
+    env_file:
+      - .env
+    volumes:
+      - ./artifacts:/app/artifacts
+    restart: unless-stopped
