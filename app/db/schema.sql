@@ -55,3 +55,26 @@ create table if not exists runtime_state (
     updated_at timestamptz default now(),
     payload jsonb
 );
+
+create table if not exists external_signals (
+    id bigint generated always as identity primary key,
+    created_at timestamptz default now(),
+    symbol text not null,
+    direction text not null,
+    score double precision default 0.0,
+    confidence double precision default 0.5,
+    source text default 'website',
+    reasoning text,
+    consumed_at timestamptz,
+    payload jsonb
+);
+
+create table if not exists journal (
+    id bigint generated always as identity primary key,
+    created_at timestamptz default now(),
+    symbol text,
+    event_type text not null,
+    headline text not null,
+    body text not null,
+    payload jsonb
+);

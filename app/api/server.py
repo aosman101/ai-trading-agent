@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db.supabase_client import TradeRepository
 from app.execution.alpaca_broker import AlpacaBroker
 from app.utils.logging import configure_logging
+from app.utils.time import utc_now_iso
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -108,3 +111,73 @@ def model_weights() -> JSONResponse:
 @app.get("/api/learning")
 def learning(limit: int = Query(default=100, ge=1, le=500)) -> JSONResponse:
     return JSONResponse(repository.learning_progress(limit=limit))
+
+
+# ---------------------------------------------------------------------------
+# External signals — website sends predictions to the agent
+# ---------------------------------------------------------------------------
+
+
+class ExternalSignalRequest(BaseModel):
+    symbol: str
+    direction: str = Field(pattern="^(long|short|flat)$")
+    score: float = Field(default=0.0, ge=-1.0, le=1.0)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    source: str = "website"
+    reasoning: Optional[str] = None
+
+
+@app.post("/api/signals")
+def submit_signal(signal: ExternalSignalRequest) -> JSONResponse:
+    """Accept an external prediction from the website.
+
+    The agent will consume it on the next cycle for this symbol and blend it
+    into the ensemble alongside its own models.
+    """
+    record = {
+        "created_at": utc_now_iso(),
+        "symbol": signal.symbol.upper(),
+        "direction": signal.direction,
+        "score": signal.score,
+        "confidence": signal.confidence,
+        "source": signal.source,
+        "reasoning": signal.reasoning,
+        "consumed_at": None,
+        "payload": {},
+    }
+    repository.submit_external_signal(record)
+    return JSONResponse(
+        {"status": "accepted", "symbol": record["symbol"], "direction": signal.direction},
+        status_code=201,
+    )
+
+
+@app.get("/api/signals")
+def list_signals(
+    limit: int = Query(default=50, ge=1, le=500),
+    symbol: Optional[str] = Query(default=None),
+) -> JSONResponse:
+    """List recent external signals (both pending and consumed)."""
+    rows = repository.list_external_signals(limit=limit)
+    if symbol:
+        rows = [r for r in rows if r.get("symbol", "").upper() == symbol.upper()]
+    return JSONResponse(rows)
+
+
+# ---------------------------------------------------------------------------
+# Journal — the agent's trading diary, readable by the website
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/journal")
+def journal(
+    limit: int = Query(default=50, ge=1, le=200),
+    symbol: Optional[str] = Query(default=None),
+) -> JSONResponse:
+    """Return the agent's trading journal — detailed human-readable entries.
+
+    Each entry explains what the agent saw, what it decided, and why.  The
+    website can render these directly.
+    """
+    entries = repository.recent_journal(limit=limit, symbol=symbol.upper() if symbol else None)
+    return JSONResponse(entries)

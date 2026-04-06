@@ -19,6 +19,8 @@ class TradeRepository:
         "learning_events",
         "model_weights",
         "runtime_state",
+        "external_signals",
+        "journal",
     )
 
     def __init__(self) -> None:
@@ -40,8 +42,19 @@ class TradeRepository:
         return self.base_path / "runtime_state.json"
 
     def _append_local(self, table: str, record: Dict[str, Any]) -> None:
+        if "id" not in record and "_local_id" not in record:
+            record = {**record, "_local_id": self._next_local_id(table)}
         with self._path(table).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, default=str) + "\n")
+
+    def _next_local_id(self, table: str) -> int:
+        rows = self._read_local(table)
+        if not rows:
+            return 1
+        max_id = max(
+            int(r.get("id") or r.get("_local_id") or 0) for r in rows
+        )
+        return max_id + 1
 
     def _read_local(self, table: str) -> List[Dict[str, Any]]:
         path = self._path(table)
@@ -172,6 +185,95 @@ class TradeRepository:
         state = self._read_runtime_state_local()
         row = state.get(state_key) or {}
         return row.get("payload") or {}
+
+    # --- External signals ---
+
+    def submit_external_signal(self, record: Dict[str, Any]) -> None:
+        self.insert("external_signals", record)
+
+    def pending_external_signals(self, symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return unconsumed external signals for *symbol*."""
+        if self.client is not None:
+            try:
+                response = (
+                    self.client.table("external_signals")
+                    .select("*")
+                    .eq("symbol", symbol)
+                    .is_("consumed_at", "null")
+                    .order("created_at", desc=False)
+                    .limit(limit)
+                    .execute()
+                )
+                return response.data or []
+            except Exception as exc:
+                logger.warning("Supabase pending_external_signals failed: %s", exc)
+        rows = self._read_local("external_signals")
+        return [
+            row for row in rows
+            if row.get("symbol") == symbol and not row.get("consumed_at")
+        ][-limit:]
+
+    def mark_signals_consumed(self, signal_ids: List[int | str]) -> None:
+        """Mark signals as consumed so they aren't re-read."""
+        now = utc_now_iso()
+        if self.client is not None:
+            try:
+                self.client.table("external_signals").update(
+                    {"consumed_at": now}
+                ).in_("id", signal_ids).execute()
+                return
+            except Exception as exc:
+                logger.warning("Supabase mark_signals_consumed failed: %s", exc)
+        # Local fallback: rewrite the JSONL (signals are small, this is fine)
+        path = self._path("external_signals")
+        if not path.exists():
+            return
+        ids_set = set(str(sid) for sid in signal_ids)
+        rows = self._read_local("external_signals")
+        with path.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                if str(row.get("id", "")) in ids_set or str(row.get("_local_id", "")) in ids_set:
+                    row["consumed_at"] = now
+                handle.write(json.dumps(row, default=str) + "\n")
+
+    def list_external_signals(self, limit: int = 50) -> List[Dict[str, Any]]:
+        return self.read("external_signals", limit=limit)
+
+    # --- Journal ---
+
+    def log_journal_entry(self, record: Dict[str, Any]) -> None:
+        self.insert("journal", record)
+
+    def recent_journal(self, limit: int = 50, symbol: str | None = None) -> List[Dict[str, Any]]:
+        if self.client is not None and symbol:
+            try:
+                response = (
+                    self.client.table("journal")
+                    .select("*")
+                    .eq("symbol", symbol)
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                return response.data or []
+            except Exception as exc:
+                logger.warning("Supabase journal read failed: %s", exc)
+        if self.client is not None and not symbol:
+            try:
+                response = (
+                    self.client.table("journal")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                return response.data or []
+            except Exception as exc:
+                logger.warning("Supabase journal read failed: %s", exc)
+        rows = self._read_local("journal")
+        if symbol:
+            rows = [r for r in rows if r.get("symbol") == symbol]
+        return list(reversed(rows[-limit:]))
 
     def dashboard_snapshot(self) -> Dict[str, Any]:
         predictions = self.recent_predictions(limit=20)

@@ -334,6 +334,137 @@ class TradingOrchestrator:
             },
         )
 
+    def _consume_external_signals(self, symbol: str) -> list[ModelSignal]:
+        """Pull pending external signals for *symbol*, convert to ModelSignals, mark consumed."""
+        pending = self.repository.pending_external_signals(symbol)
+        if not pending:
+            return []
+        signals: list[ModelSignal] = []
+        ids_to_consume: list[int | str] = []
+        for row in pending:
+            direction = str(row.get("direction", "flat")).lower()
+            if direction not in {"long", "short", "flat"}:
+                direction = "flat"
+            score = float(row.get("score", 0.0) or 0.0)
+            confidence = float(row.get("confidence", 0.5) or 0.5)
+            source = str(row.get("source", "website"))
+            signals.append(
+                ModelSignal(
+                    name=f"external:{source}",
+                    symbol=symbol,
+                    direction=direction,
+                    score=score,
+                    confidence=confidence,
+                    metadata={
+                        "source": source,
+                        "reasoning": row.get("reasoning", ""),
+                        "external_signal_id": row.get("id") or row.get("_local_id"),
+                    },
+                )
+            )
+            signal_id = row.get("id") or row.get("_local_id")
+            if signal_id is not None:
+                ids_to_consume.append(signal_id)
+        if ids_to_consume:
+            self.repository.mark_signals_consumed(ids_to_consume)
+        logger.info("Consumed %d external signal(s) for %s", len(signals), symbol)
+        return signals
+
+    def _write_journal_entry(
+        self,
+        symbol: str,
+        decision,
+        risk_plan,
+        model_signals: list[ModelSignal],
+        selected_strategy,
+        market_regime: str,
+        equity: float,
+        daily_pnl: float,
+        order_response: dict | None,
+    ) -> None:
+        """Write a detailed, human-readable journal entry for the website."""
+        traded = order_response is not None
+        if traded:
+            headline = (
+                f"{'Bought' if decision.direction == 'long' else 'Sold'} "
+                f"{risk_plan.quantity} {symbol} @ ${risk_plan.entry_price:.2f}"
+            )
+        elif risk_plan.reasons:
+            headline = f"Skipped {symbol}: {risk_plan.reasons[0]}"
+        else:
+            headline = f"No trade for {symbol} this cycle"
+
+        # Build the body — a narrative the website can display directly.
+        lines: list[str] = []
+        lines.append(f"Market regime: {market_regime}")
+        lines.append(f"Account equity: ${equity:,.2f} | Day P&L: ${daily_pnl:,.2f}")
+        lines.append("")
+
+        lines.append("Model signals:")
+        for sig in model_signals:
+            tag = f"  {sig.name}: {sig.direction} (score={sig.score:+.3f}, conf={sig.confidence:.2f})"
+            reasoning = sig.metadata.get("reasoning")
+            if reasoning:
+                tag += f" — {reasoning}"
+            lines.append(tag)
+        lines.append("")
+
+        if selected_strategy:
+            lines.append(f"Selected strategy: {selected_strategy.strategy} ({selected_strategy.direction}, conf={selected_strategy.confidence:.2f})")
+        else:
+            lines.append("Selected strategy: none passed deployment thresholds")
+        lines.append("")
+
+        lines.append(f"Ensemble decision: {decision.direction} (score={decision.weighted_score:+.4f}, conf={decision.confidence:.2f})")
+        lines.append(f"Most influential: {decision.most_influential_model or 'none'}")
+        lines.append(f"Weight scope: {decision.weight_scope or 'uniform'}")
+        lines.append("")
+
+        if traded:
+            lines.append(f"Order placed: {risk_plan.direction} {risk_plan.quantity} shares")
+            lines.append(f"  Entry: ${risk_plan.entry_price:.2f} | Stop: ${risk_plan.stop_loss:.2f} | Target: ${risk_plan.take_profit:.2f}")
+            lines.append(f"  Risk: ${risk_plan.risk_amount:.2f} | Notional: ${risk_plan.notional:.2f}")
+            regime_scale = risk_plan.metadata.get("regime_scale", "n/a")
+            dd_scale = risk_plan.metadata.get("drawdown_scale", "n/a")
+            lines.append(f"  Regime scale: {regime_scale} | Drawdown scale: {dd_scale}")
+        else:
+            lines.append("Trade not placed:")
+            for reason in risk_plan.reasons:
+                lines.append(f"  - {reason}")
+
+        # Weight breakdown
+        lines.append("")
+        lines.append("Model weights:")
+        for name, weight in sorted(decision.weights.items(), key=lambda kv: kv[1], reverse=True):
+            lines.append(f"  {name}: {weight:.1%}")
+
+        body = "\n".join(lines)
+        event_type = "trade_executed" if traded else "trade_skipped"
+
+        self.repository.log_journal_entry(
+            {
+                "created_at": utc_now_iso(),
+                "symbol": symbol,
+                "event_type": event_type,
+                "headline": headline,
+                "body": body,
+                "payload": {
+                    "direction": decision.direction,
+                    "confidence": decision.confidence,
+                    "weighted_score": decision.weighted_score,
+                    "market_regime": market_regime,
+                    "risk_plan_approved": risk_plan.approved,
+                    "quantity": risk_plan.quantity,
+                    "entry_price": risk_plan.entry_price,
+                    "stop_loss": risk_plan.stop_loss,
+                    "take_profit": risk_plan.take_profit,
+                    "weights": decision.weights,
+                    "contributions": decision.contributions,
+                    "model_signals": [s.model_dump() for s in model_signals],
+                },
+            }
+        )
+
     def _can_place_order(self) -> bool:
         if self.settings.trading_mode == "paper":
             return True
@@ -456,6 +587,10 @@ class TradingOrchestrator:
         ]
         if itransformer_signal is not None:
             model_signals.append(itransformer_signal)
+
+        external_signals = self._consume_external_signals(symbol)
+        model_signals.extend(external_signals)
+
         decision = self.decision_engine.combine(
             symbol=symbol,
             model_signals=model_signals,
@@ -531,6 +666,18 @@ class TradingOrchestrator:
                     },
                 }
             )
+
+        self._write_journal_entry(
+            symbol=symbol,
+            decision=decision,
+            risk_plan=risk_plan,
+            model_signals=model_signals,
+            selected_strategy=selected_strategy,
+            market_regime=market_regime,
+            equity=equity,
+            daily_pnl=daily_pnl,
+            order_response=order_response,
+        )
 
         status_snapshot = {
             "last_cycle_at": utc_now_iso(),

@@ -77,6 +77,9 @@ class FakeRepository:
         self.equity_logged = []
         self.learning_events = []
         self.weights_saved = []
+        self.journal_entries = []
+        self._external_signals: list[dict] = []
+        self._consumed_signal_ids: set = set()
 
     def recent_predictions(self, limit: int = 100):
         return [
@@ -110,11 +113,23 @@ class FakeRepository:
     def log_learning_event(self, record):
         self.learning_events.append(record)
 
+    def log_journal_entry(self, record):
+        self.journal_entries.append(record)
+
     def write_runtime_state(self, state_key: str, payload):
         self.runtime_state[state_key] = payload
 
     def read_runtime_state(self, state_key: str):
         return self.runtime_state.get(state_key, {})
+
+    def pending_external_signals(self, symbol: str, limit: int = 20):
+        return [
+            s for s in self._external_signals
+            if s.get("symbol") == symbol and s.get("id") not in self._consumed_signal_ids
+        ][:limit]
+
+    def mark_signals_consumed(self, signal_ids):
+        self._consumed_signal_ids.update(str(sid) for sid in signal_ids)
 
 
 class FakeBroker:
@@ -318,3 +333,148 @@ def test_run_cycle_logs_error_on_symbol_failure():
     assert results == []
     assert len(orchestrator.repository.learning_events) == 1
     assert orchestrator.repository.learning_events[0]["event_type"] == "cycle_error"
+
+
+# ---------------------------------------------------------------------------
+# External signals integration
+# ---------------------------------------------------------------------------
+
+
+def test_external_signal_is_consumed_and_included_in_ensemble():
+    orchestrator = _build_orchestrator()
+    orchestrator.repository._external_signals = [
+        {
+            "id": 1,
+            "symbol": "AAPL",
+            "direction": "long",
+            "score": 0.8,
+            "confidence": 0.9,
+            "source": "website",
+            "reasoning": "Strong breakout pattern on 4h chart",
+        }
+    ]
+
+    result = orchestrator.run_cycle_for_symbol("AAPL")
+
+    # External signal should appear in the logged prediction payload
+    logged = orchestrator.repository.predictions_logged[0]
+    signal_names = [s["name"] for s in logged["payload"]["model_signals"]]
+    assert "external:website" in signal_names
+
+    # Signal should be marked as consumed
+    assert "1" in orchestrator.repository._consumed_signal_ids
+
+    # Decision should still be valid
+    assert result["decision"]["direction"] in {"long", "short", "flat"}
+
+
+def test_external_signal_with_no_pending_does_not_break_cycle():
+    orchestrator = _build_orchestrator()
+    # No external signals queued — should run normally
+    result = orchestrator.run_cycle_for_symbol("AAPL")
+    assert result["decision"]["direction"] == "long"
+
+    # No external signals in the prediction payload
+    logged = orchestrator.repository.predictions_logged[0]
+    signal_names = [s["name"] for s in logged["payload"]["model_signals"]]
+    assert not any(n.startswith("external:") for n in signal_names)
+
+
+def test_multiple_external_signals_all_consumed():
+    orchestrator = _build_orchestrator()
+    orchestrator.repository._external_signals = [
+        {"id": 10, "symbol": "AAPL", "direction": "long", "score": 0.6, "confidence": 0.7, "source": "site_a", "reasoning": ""},
+        {"id": 11, "symbol": "AAPL", "direction": "short", "score": -0.3, "confidence": 0.5, "source": "site_b", "reasoning": ""},
+        {"id": 12, "symbol": "MSFT", "direction": "long", "score": 0.5, "confidence": 0.6, "source": "site_a", "reasoning": ""},
+    ]
+
+    orchestrator.run_cycle_for_symbol("AAPL")
+
+    # Only AAPL signals consumed (MSFT signal left alone)
+    assert "10" in orchestrator.repository._consumed_signal_ids
+    assert "11" in orchestrator.repository._consumed_signal_ids
+    assert "12" not in orchestrator.repository._consumed_signal_ids
+
+
+def test_invalid_external_direction_normalized_to_flat():
+    orchestrator = _build_orchestrator()
+    orchestrator.repository._external_signals = [
+        {"id": 99, "symbol": "AAPL", "direction": "YOLO", "score": 1.0, "confidence": 1.0, "source": "test", "reasoning": ""},
+    ]
+
+    result = orchestrator.run_cycle_for_symbol("AAPL")
+    logged = orchestrator.repository.predictions_logged[0]
+    ext_signals = [s for s in logged["payload"]["model_signals"] if s["name"].startswith("external:")]
+    assert ext_signals[0]["direction"] == "flat"
+
+
+# ---------------------------------------------------------------------------
+# Journal
+# ---------------------------------------------------------------------------
+
+
+def test_journal_entry_written_on_trade():
+    orchestrator = _build_orchestrator()
+    orchestrator.run_cycle_for_symbol("AAPL")
+
+    assert len(orchestrator.repository.journal_entries) == 1
+    entry = orchestrator.repository.journal_entries[0]
+    assert entry["symbol"] == "AAPL"
+    assert entry["event_type"] in {"trade_executed", "trade_skipped"}
+    assert "headline" in entry
+    assert "body" in entry
+    assert "Model signals:" in entry["body"]
+    assert "Ensemble decision:" in entry["body"]
+    assert "Model weights:" in entry["body"]
+
+
+def test_journal_entry_includes_external_signal_reasoning():
+    orchestrator = _build_orchestrator()
+    orchestrator.repository._external_signals = [
+        {
+            "id": 50,
+            "symbol": "AAPL",
+            "direction": "long",
+            "score": 0.7,
+            "confidence": 0.8,
+            "source": "website",
+            "reasoning": "Cup and handle forming on daily",
+        }
+    ]
+
+    orchestrator.run_cycle_for_symbol("AAPL")
+
+    entry = orchestrator.repository.journal_entries[0]
+    assert "Cup and handle forming on daily" in entry["body"]
+
+
+def test_journal_skipped_trade_shows_reasons():
+    orchestrator = _build_orchestrator()
+    # Force a flat decision by making all models flat and removing confident strategies
+    orchestrator.models = SimpleNamespace(
+        nhits=FakePredictor("nhits", "flat", 0.0, 0.3),
+        lightgbm=FakePredictor("lightgbm", "flat", 0.0, 0.3),
+        tft=FakePredictor("tft", "flat", 0.0, 0.3, metadata={"interval_width": 1.0}),
+        finbert=FakePredictor("finbert", "flat", 0.0, 0.3),
+        ppo=FakeRLAgent("ppo", "flat"),
+        dqn=FakeRLAgent("dqn", "flat"),
+        itransformer=None,
+        backtester=FakeBacktester(),
+    )
+
+    class FlatStrategy:
+        name = "flat_strat"
+
+        def generate_series(self, frame, sentiment_score=0.0):
+            return pd.Series([0.0] * len(frame), index=frame.index)
+
+        def generate_latest(self, frame, sentiment_score=0.0):
+            return StrategySignal(strategy=self.name, symbol="AAPL", direction="flat", confidence=0.0)
+
+    orchestrator.rule_strategies = [FlatStrategy()]
+
+    orchestrator.run_cycle_for_symbol("AAPL")
+
+    entry = orchestrator.repository.journal_entries[0]
+    assert entry["event_type"] == "trade_skipped"
+    assert "Trade not placed:" in entry["body"]
