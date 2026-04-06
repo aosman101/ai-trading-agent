@@ -165,6 +165,22 @@ class TestBuildTradePlan:
         )
         assert plan.notional <= 100_000.0 * risk_manager.settings.max_portfolio_heat
 
+    def test_existing_exposure_reduces_new_trade(self, risk_manager):
+        decision = _make_decision(direction="long", confidence=1.0)
+        plan = risk_manager.build_trade_plan(
+            symbol="AAPL",
+            decision=decision,
+            price=100.0,
+            atr=2.0,
+            interval_width=1.0,
+            equity=100_000.0,
+            current_daily_pnl=0.0,
+            current_open_notional=9_500.0,
+        )
+        assert plan.approved is True
+        assert plan.notional <= 500.0
+        assert plan.metadata["projected_portfolio_heat"] <= risk_manager.settings.max_portfolio_heat
+
     def test_notional_and_risk_amount_positive(self, risk_manager):
         decision = _make_decision(direction="long", confidence=0.75)
         plan = risk_manager.build_trade_plan(

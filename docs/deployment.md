@@ -28,6 +28,20 @@ This starts:
 - `api` on port 8000
 - `worker` for scheduled trading cycles and retraining
 
+## Shared state requirements
+
+If you deploy the API and worker as separate services, do not rely on
+per-service local files for shared dashboard state.
+
+Use:
+
+- Supabase for trades, predictions, equity, and runtime state
+- a persistent disk for model artifacts on the worker
+
+The worker now publishes runtime state such as heartbeat, latest cycle,
+portfolio heat, and adaptive model-performance snapshots so the API can
+report meaningful health information even when it runs on a separate host.
+
 ## Hardening for production
 
 - Put the API behind Nginx or Caddy with HTTPS.

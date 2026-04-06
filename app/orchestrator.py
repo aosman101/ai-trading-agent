@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime
-from typing import Dict, Iterable
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable
 
 import numpy as np
 import pandas as pd
 
+from app.backtesting.metrics import max_drawdown, sharpe_ratio
 from app.config import get_settings
 from app.data.market_data import MarketDataService
 from app.data.news_data import NewsDataService
@@ -23,6 +24,7 @@ from app.strategies.trend_following import TrendFollowingStrategy
 from app.training.retrainer import ModelBundle, ModelTrainer
 from app.types import ModelSignal, StrategySignal
 from app.utils.logging import get_logger
+from app.utils.time import utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -40,6 +42,7 @@ class TradingOrchestrator:
         self.model_trainer = ModelTrainer()
         self.models: ModelBundle = self.model_trainer.load_or_bootstrap()
         self._model_lock = threading.Lock()
+        self._hydrate_model_performance()
 
         self.rule_strategies = [
             MomentumStrategy(),
@@ -49,7 +52,13 @@ class TradingOrchestrator:
             SentimentStrategy(),
         ]
 
-    def _build_live_rl_observation(self, frame: pd.DataFrame) -> np.ndarray:
+    def _hydrate_model_performance(self) -> None:
+        snapshot = self.repository.read_runtime_state("model_performance")
+        for model_name, metrics in snapshot.items():
+            if isinstance(metrics, dict):
+                self.decision_engine.update_model_performance(model_name, metrics)
+
+    def _build_live_rl_observation(self, frame: pd.DataFrame, live_state: Dict[str, float]) -> np.ndarray:
         work = frame.copy()
         for strategy in self.rule_strategies:
             work[f"signal_{strategy.name}"] = strategy.generate_series(work)
@@ -72,8 +81,156 @@ class TradingOrchestrator:
         feature_columns = [column for column in work.columns if column not in excluded]
         latest_row = work.dropna().iloc[-1]
         observation = latest_row[feature_columns].astype(float).to_numpy(dtype=np.float32)
-        extras = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        extras = np.array(
+            [
+                float(live_state.get("current_position", 0.0)),
+                float(live_state.get("portfolio_value", 1.0)),
+                float(live_state.get("drawdown", 0.0)),
+            ],
+            dtype=np.float32,
+        )
         return np.concatenate([observation, extras]).astype(np.float32)
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _prediction_outcome(self, history_frame: pd.DataFrame, created_at: Any) -> float | None:
+        timestamp = self._parse_timestamp(created_at)
+        if timestamp is None or history_frame.empty:
+            return None
+
+        ds_values = pd.to_datetime(history_frame["ds"], utc=False)
+        search_point = pd.Timestamp(timestamp.date())
+        anchor_idx = ds_values.searchsorted(search_point, side="right") - 1
+        if anchor_idx < 0 or anchor_idx >= len(history_frame) - 1:
+            return None
+
+        entry_price = float(history_frame.iloc[anchor_idx]["close"])
+        exit_price = float(history_frame.iloc[anchor_idx + 1]["close"])
+        if entry_price == 0:
+            return None
+        return (exit_price / entry_price) - 1.0
+
+    @staticmethod
+    def _signal_direction_multiplier(direction: str) -> float:
+        return {"long": 1.0, "short": -1.0, "flat": 0.0}.get(direction, 0.0)
+
+    def _refresh_model_performance(self, symbol: str, history_frame: pd.DataFrame) -> None:
+        recent_predictions = self.repository.recent_predictions(
+            limit=max(self.settings.model_performance_lookback * 3, 300)
+        )
+        per_model_returns: dict[str, list[float]] = {}
+        per_model_accuracy: dict[str, list[float]] = {}
+        per_model_calibration: dict[str, list[float]] = {}
+
+        for prediction in recent_predictions:
+            if prediction.get("symbol") != symbol:
+                continue
+            realized_return = self._prediction_outcome(history_frame, prediction.get("created_at"))
+            if realized_return is None:
+                continue
+            payload = prediction.get("payload") or {}
+            signals = payload.get("model_signals") or []
+            for signal in signals:
+                model_name = str(signal.get("name", "")).strip()
+                if not model_name:
+                    continue
+                direction = str(signal.get("direction", "flat"))
+                direction_multiplier = self._signal_direction_multiplier(direction)
+                confidence = float(signal.get("confidence", 0.0) or 0.0)
+                signal_return = direction_multiplier * realized_return
+                if direction_multiplier == 0.0:
+                    accuracy = 1.0 if abs(realized_return) < 0.002 else 0.0
+                    signal_return = -abs(realized_return) * 0.1
+                else:
+                    accuracy = 1.0 if signal_return > 0 else 0.0
+                realized_strength = min(abs(realized_return) / 0.02, 1.0)
+                calibration_error = abs(confidence - realized_strength)
+
+                per_model_returns.setdefault(model_name, []).append(signal_return)
+                per_model_accuracy.setdefault(model_name, []).append(accuracy)
+                per_model_calibration.setdefault(model_name, []).append(calibration_error)
+
+        metrics_snapshot: dict[str, dict[str, float]] = {}
+        for model_name, returns in per_model_returns.items():
+            clipped_returns = returns[-self.settings.model_performance_lookback :]
+            accuracy = per_model_accuracy.get(model_name, [])[-self.settings.model_performance_lookback :]
+            calibration = per_model_calibration.get(model_name, [])[-self.settings.model_performance_lookback :]
+            returns_series = pd.Series(clipped_returns, dtype=float)
+            equity_curve = (1.0 + returns_series).cumprod()
+            metrics = {
+                "accuracy": float(np.mean(accuracy)) if accuracy else 0.5,
+                "sharpe": sharpe_ratio(returns_series, periods_per_year=max(len(returns_series), 1)),
+                "calibration": float(np.mean(calibration)) if calibration else 0.5,
+                "drawdown": max_drawdown(equity_curve) if not equity_curve.empty else 0.0,
+                "samples": float(len(clipped_returns)),
+                "avg_edge": float(returns_series.mean()) if not returns_series.empty else 0.0,
+            }
+            self.decision_engine.update_model_performance(model_name, metrics)
+            metrics_snapshot[model_name] = metrics
+
+        if metrics_snapshot:
+            self.repository.write_runtime_state("model_performance", metrics_snapshot)
+
+    def _portfolio_state_snapshot(
+        self,
+        symbol: str,
+        equity: float,
+        open_positions: Dict[str, float],
+    ) -> Dict[str, float]:
+        live_state = self.repository.read_runtime_state("live_state")
+        reference_equity = float(live_state.get("reference_equity") or equity or 1.0)
+        max_equity = max(float(live_state.get("max_equity") or reference_equity), equity, 1.0)
+        current_qty = float(open_positions.get(symbol, 0.0))
+        current_position = 1.0 if current_qty > 0 else -1.0 if current_qty < 0 else 0.0
+        portfolio_value = equity / max(reference_equity, 1e-9)
+        drawdown = max(0.0, 1.0 - (equity / max(max_equity, 1e-9)))
+        return {
+            "current_position": current_position,
+            "portfolio_value": portfolio_value,
+            "drawdown": drawdown,
+            "reference_equity": reference_equity,
+            "max_equity": max_equity,
+        }
+
+    def _estimate_open_notional(
+        self,
+        open_positions: Dict[str, float],
+        latest_prices: Dict[str, float] | None = None,
+    ) -> float:
+        latest_prices = dict(latest_prices or {})
+        total_notional = 0.0
+        for open_symbol, qty in open_positions.items():
+            if qty == 0:
+                continue
+            price = latest_prices.get(open_symbol)
+            if price is None:
+                try:
+                    price = float(self.market_data.latest_feature_row(open_symbol)["close"])
+                except Exception as exc:
+                    logger.warning("Unable to estimate current price for open position %s: %s", open_symbol, exc)
+                    continue
+                latest_prices[open_symbol] = price
+            total_notional += abs(float(qty)) * abs(float(price))
+        return total_notional
+
+    def _write_worker_status(self, payload: Dict[str, Any]) -> None:
+        current = self.repository.read_runtime_state("worker_status")
+        current.update(payload)
+        current["heartbeat_at"] = utc_now_iso()
+        self.repository.write_runtime_state("worker_status", current)
 
     def _combine_rl_agents(self, symbol: str, observation: np.ndarray, models: ModelBundle | None = None) -> ModelSignal:
         models = models or self.models
@@ -138,7 +295,7 @@ class TradingOrchestrator:
     ) -> None:
         self.repository.log_prediction(
             {
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": utc_now_iso(),
                 "symbol": symbol,
                 "direction": decision.direction,
                 "confidence": decision.confidence,
@@ -156,7 +313,7 @@ class TradingOrchestrator:
         )
         self.repository.save_model_weights(
             {
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": utc_now_iso(),
                 "payload": decision.weights,
             }
         )
@@ -167,6 +324,14 @@ class TradingOrchestrator:
         history = self.market_data.fetch_symbol_history(symbol)
         history_frame = history.reset_index(names="ds")
         latest_row = history.iloc[-1]
+        latest_price = float(latest_row["close"])
+        self._refresh_model_performance(symbol, history_frame)
+        equity = self.broker.account_equity()
+        daily_pnl = self.broker.day_pnl()
+        open_positions = self.broker.list_open_positions()
+        current_open_notional = self._estimate_open_notional(open_positions, latest_prices={symbol: latest_price})
+        current_portfolio_heat = (current_open_notional / equity) if equity > 0 else 0.0
+        live_state = self._portfolio_state_snapshot(symbol, equity, open_positions)
 
         texts = self.news_data.collect_text_corpus(symbol)
         finbert_signal = models.finbert.predict_latest(symbol, texts)
@@ -186,7 +351,7 @@ class TradingOrchestrator:
         strategy_signals = self._make_strategy_signals(history, sentiment_score=finbert_signal.score)
         selected_strategy = self.strategy_selector.select_best(strategy_signals, strategy_metrics)
 
-        observation = self._build_live_rl_observation(history_frame)
+        observation = self._build_live_rl_observation(history_frame, live_state)
         rl_signal = self._combine_rl_agents(symbol, observation, models=models)
 
         model_signals = [
@@ -204,28 +369,35 @@ class TradingOrchestrator:
             selected_strategy=selected_strategy,
         )
 
-        equity = self.broker.account_equity()
-        daily_pnl = self.broker.day_pnl()
-        open_positions = self.broker.list_open_positions()
         risk_plan = self.risk_manager.build_trade_plan(
             symbol=symbol,
             decision=decision,
-            price=float(latest_row["close"]),
-            atr=float(latest_row.get("atr_14", latest_row["close"] * 0.01)),
-            interval_width=float(tft_signal.metadata.get("interval_width", latest_row["close"] * 0.01)),
+            price=latest_price,
+            atr=float(latest_row.get("atr_14", latest_price * 0.01)),
+            interval_width=float(tft_signal.metadata.get("interval_width", latest_price * 0.01)),
             equity=equity,
             current_daily_pnl=daily_pnl,
             open_positions=open_positions,
+            current_open_notional=current_open_notional,
         )
 
         self._log_prediction(symbol, decision, model_signals, selected_strategy)
         self.repository.log_equity(
             {
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": utc_now_iso(),
                 "equity": equity,
                 "day_pnl": daily_pnl,
                 "payload": {"open_positions": open_positions},
             }
+        )
+        self.repository.write_runtime_state(
+            "live_state",
+            {
+                **live_state,
+                "symbol": symbol,
+                "equity": equity,
+                "current_portfolio_heat": current_portfolio_heat,
+            },
         )
 
         order_response: Dict[str, object] | None = None
@@ -233,7 +405,7 @@ class TradingOrchestrator:
             order_response = self.broker.place_bracket_order(risk_plan)
             self.repository.log_trade(
                 {
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": utc_now_iso(),
                     "symbol": symbol,
                     "direction": risk_plan.direction,
                     "quantity": risk_plan.quantity,
@@ -254,7 +426,7 @@ class TradingOrchestrator:
         else:
             self.repository.log_learning_event(
                 {
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": utc_now_iso(),
                     "event_type": "trade_skipped",
                     "message": "; ".join(risk_plan.reasons) or "Order gating prevented trade placement",
                     "payload": {
@@ -265,38 +437,66 @@ class TradingOrchestrator:
                 }
             )
 
+        status_snapshot = {
+            "last_cycle_at": utc_now_iso(),
+            "account_equity": equity,
+            "day_pnl": daily_pnl,
+            "open_positions": open_positions,
+            "current_portfolio_heat": current_portfolio_heat,
+            "current_strategy": decision.selected_strategy,
+            "most_influential_model": decision.most_influential_model,
+            "last_symbol": symbol,
+            "last_error": None,
+        }
+
         return {
             "symbol": symbol,
             "decision": decision.model_dump(),
             "risk_plan": risk_plan.model_dump(),
             "order_response": order_response,
+            "status_snapshot": status_snapshot,
         }
 
     def run_cycle(self, symbols: Iterable[str] | None = None) -> list[Dict[str, object]]:
         symbols = list(symbols or self.settings.symbols)
         results = []
+        last_error = None
         for symbol in symbols:
             try:
                 logger.info("Running cycle for %s", symbol)
                 result = self.run_cycle_for_symbol(symbol)
                 results.append(result)
             except Exception as exc:
+                last_error = f"{symbol} cycle failed: {exc}"
                 logger.exception("Trading cycle failed for %s: %s", symbol, exc)
                 self.repository.log_learning_event(
                     {
-                        "created_at": datetime.utcnow().isoformat(),
+                        "created_at": utc_now_iso(),
                         "event_type": "cycle_error",
                         "message": f"{symbol} cycle failed: {exc}",
                         "payload": {"symbol": symbol},
                     }
                 )
+        if results:
+            status_snapshot = dict(results[-1]["status_snapshot"])
+            status_snapshot["last_cycle_symbols"] = symbols
+            status_snapshot["last_error"] = last_error
+            self._write_worker_status(status_snapshot)
+        elif last_error:
+            self._write_worker_status(
+                {
+                    "last_cycle_at": utc_now_iso(),
+                    "last_cycle_symbols": symbols,
+                    "last_error": last_error,
+                }
+            )
         return results
 
     def retrain(self, symbols: Iterable[str] | None = None) -> None:
         logger.info("Starting scheduled retraining")
         self.repository.log_learning_event(
             {
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": utc_now_iso(),
                 "event_type": "retrain_started",
                 "message": "Scheduled retraining started",
                 "payload": {"symbols": list(symbols or self.settings.symbols)},
@@ -307,7 +507,7 @@ class TradingOrchestrator:
             self.models = new_models
         self.repository.log_learning_event(
             {
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": utc_now_iso(),
                 "event_type": "retrain_completed",
                 "message": "Scheduled retraining completed",
                 "payload": {"symbols": list(symbols or self.settings.symbols)},

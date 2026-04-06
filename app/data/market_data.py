@@ -10,6 +10,7 @@ import yfinance as yf
 
 from app.config import get_settings
 from app.utils.logging import get_logger
+from app.utils.time import utc_now
 
 logger = get_logger(__name__)
 
@@ -152,7 +153,7 @@ class MarketDataService:
         include_targets: bool = False,
     ) -> pd.DataFrame:
         if end is None:
-            end = datetime.utcnow()
+            end = utc_now().replace(tzinfo=None)
         if start is None:
             start = end - timedelta(days=365 * self.settings.lookback_years)
         if interval is None:

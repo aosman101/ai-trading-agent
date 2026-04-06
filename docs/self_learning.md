@@ -29,9 +29,17 @@ This means the forecasting models adapt as the market regime changes.
 
 ## 3) Meta-learning loop
 
-The ensemble keeps track of which models have been working recently.
+The ensemble keeps track of which models have been working recently by
+scoring recent model signals against realized next-bar returns.
 
-If one model has better recent accuracy, Sharpe, and calibration, its ensemble weight rises automatically.
+For each model, the worker updates:
+
+- directional accuracy
+- realized signal Sharpe
+- confidence calibration error
+- realized drawdown from recent signal returns
+
+If one model has better recent live performance, its ensemble weight rises automatically.
 If it degrades, its weight falls.
 
 ## Why not update everything after every single trade?
@@ -41,7 +49,7 @@ Because that is usually a fast route to overfitting and unstable behavior.
 The safer pattern is:
 
 - log every trade immediately
-- update ensemble weights from recent outcomes
+- update ensemble weights from recent realized outcomes
 - retrain supervised models on a schedule
 - retrain RL policies from the full experience buffer
 

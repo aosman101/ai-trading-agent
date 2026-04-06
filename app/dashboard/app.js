@@ -41,11 +41,15 @@ async function refreshDashboard() {
     <p><span class="pill">Mode: ${status.trading_mode}</span></p>
     <p>Live Enabled: <strong>${status.live_enabled}</strong></p>
     <p>Kill Switch: <strong>${status.kill_switch}</strong></p>
+    <p>Worker Healthy: <strong>${status.worker_healthy}</strong></p>
+    <p>Last Cycle: <strong>${status.last_cycle_at || "n/a"}</strong></p>
     <p>Current Strategy: <strong>${status.current_strategy || "n/a"}</strong></p>
     <p>Most Influential Model: <strong>${status.most_influential_model || "n/a"}</strong></p>
     <p>Account Equity: <strong>${status.account_equity}</strong></p>
     <p>Day PnL: <strong>${status.day_pnl}</strong></p>
+    <p>Portfolio Heat: <strong>${status.current_portfolio_heat ?? "n/a"}</strong></p>
     <p>Open Positions: <code>${JSON.stringify(status.open_positions)}</code></p>
+    <p>Last Error: <strong>${status.last_error || "none"}</strong></p>
   `;
 
   weightsEl.textContent = JSON.stringify(weights.payload || {}, null, 2);
