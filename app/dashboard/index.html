@@ -9,16 +9,33 @@
     h1, h2 { margin-bottom: 8px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
     .card { background: #1f2937; border-radius: 12px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.2); }
+    .stack { display: grid; gap: 12px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 8px; border-bottom: 1px solid #374151; text-align: left; font-size: 14px; }
     .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #374151; }
     canvas { background: #ffffff; border-radius: 8px; padding: 8px; }
     code { background: #374151; padding: 2px 4px; border-radius: 4px; }
+    input, select, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      background: #111827;
+      color: #f3f4f6;
+      border: 1px solid #4b5563;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    textarea { min-height: 120px; resize: vertical; }
+    button { background: #0f766e; border: none; cursor: pointer; font-weight: 600; }
+    button:hover { background: #115e59; }
+    .hint { font-size: 13px; color: #cbd5e1; }
+    .form-status { min-height: 20px; font-size: 14px; }
+    .journal-entry { border-top: 1px solid #374151; padding-top: 12px; margin-top: 12px; }
+    .journal-entry pre { white-space: pre-wrap; background: #111827; padding: 12px; border-radius: 8px; }
   </style>
 </head>
 <body>
   <h1>AI Trading Agent Dashboard</h1>
-  <p>This page polls the FastAPI backend for current state, trades, model weights, and learning progress.</p>
+  <p>This page polls the FastAPI backend for current state, trades, model weights, learning progress, and the agent journal.</p>
 
   <div class="grid">
     <div class="card">
@@ -32,6 +49,24 @@
     <div class="card">
       <h2>Learning Progress</h2>
       <div id="learning"></div>
+    </div>
+    <div class="card">
+      <h2>Communicate With Agent</h2>
+      <div class="stack">
+        <p class="hint">Send a directional signal and reasoning. The agent will consume it on the next cycle and blend it into the ensemble.</p>
+        <input id="signalSymbol" type="text" value="AAPL" placeholder="Symbol" />
+        <select id="signalDirection">
+          <option value="long">long</option>
+          <option value="short">short</option>
+          <option value="flat">flat</option>
+        </select>
+        <input id="signalScore" type="number" min="-1" max="1" step="0.01" value="0.25" placeholder="Score (-1 to 1)" />
+        <input id="signalConfidence" type="number" min="0" max="1" step="0.01" value="0.65" placeholder="Confidence (0 to 1)" />
+        <input id="signalSource" type="text" value="dashboard" placeholder="Source" />
+        <textarea id="signalReasoning" placeholder="Reasoning for the agent"></textarea>
+        <button id="sendSignalButton" type="button">Send Signal</button>
+        <div id="signalFormStatus" class="form-status"></div>
+      </div>
     </div>
   </div>
 
@@ -48,6 +83,11 @@
   <div class="card" style="margin-top: 16px;">
     <h2>Recent Predictions</h2>
     <div id="predictions"></div>
+  </div>
+
+  <div class="card" style="margin-top: 16px;">
+    <h2>Agent Journal</h2>
+    <div id="journal"></div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>

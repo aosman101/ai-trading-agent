@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 
-> Autonomous AI-powered swing trading agent that integrates deep learning forecasters, reinforcement learning, and rule-based strategies into a risk-managed ensemble—with a paper-trading-first safety by default.
+> Autonomous AI-powered swing trading agent that blends remote DSI forecasts, local sentiment/RL models, and rule-based strategies into a risk-managed ensemble with paper-trading-first safety gates.
 
 ---
 
@@ -17,61 +17,55 @@
 
 ```
 Market Data (yfinance) ──┐
-News (RSS/Alpha Vantage) ─┤
-Reddit Sentiment ─────────┤
+News / RSS / Reddit ─────┤
                           ▼
               ┌───────────────────────┐
               │     Feature Engine    │
-              │  (30+ technical       │
-              │   indicators + macro) │
+              │  technical indicators │
+              │   + market context    │
               └───────┬───────────────┘
                       │
-         ┌────────────┼────────────┐
-         ▼            ▼            ▼
-   ┌──────────┐ ┌──────────┐ ┌──────────┐
-   │  NHITS   │ │   TFT    │ │ LightGBM │
-   │ Forecast │ │ Interval │ │ Classify │
-   └────┬─────┘ └────┬─────┘ └────┬─────┘
-        │            │             │
-   ┌────┴─────┐ ┌────┴─────┐      │
-   │ FinBERT  │ │ PPO  DQN │      │
-   │Sentiment │ │  RL Meta │      │
-   └────┬─────┘ └────┬─────┘      │
-        │            │             │
-        └────────────┼─────────────┘
-                     ▼
-         ┌───────────────────────┐
-         │   Ensemble Decision   │
-         │  Engine (dynamic      │
-         │  weighted scoring)    │
-         └───────┬───────────────┘
-                 ▼
-         ┌───────────────────────┐
-         │   Risk Manager        │
-         │  ATR stops · heat cap │
-         │  daily loss limit     │
-         └───────┬───────────────┘
-                 ▼
-         ┌───────────────────────┐
-         │   Alpaca Broker       │
-         │  bracket orders       │
-         │  paper / live         │
-         └───────┬───────────────┘
-                 ▼
-         ┌───────────────────────┐
-         │   Supabase / JSONL    │
-         │  predictions · trades │
-         │  equity · events      │
-         └───────────────────────┘
+         ┌────────────┼───────────────┐
+         ▼            ▼               ▼
+   ┌──────────┐ ┌──────────┐   ┌────────────┐
+   │   DSI    │ │ FinBERT  │   │ PPO / DQN  │
+   │NHITS/TFT │ │Sentiment │   │ RL Meta    │
+   │LightGBM  │ └────┬─────┘   └────┬───────┘
+   └────┬─────┘      │              │
+        │            └──────┬───────┘
+        │                   ▼
+        │         ┌───────────────────────┐
+        └────────▶│   Ensemble Decision   │
+                  │  Engine (dynamic      │
+                  │  weighted scoring)    │
+                  └───────┬───────────────┘
+                          ▼
+                  ┌───────────────────────┐
+                  │   Risk Manager        │
+                  │  ATR stops · heat cap │
+                  │  daily loss limit     │
+                  └───────┬───────────────┘
+                          ▼
+                  ┌───────────────────────┐
+                  │   Alpaca Broker       │
+                  │  bracket orders       │
+                  │  paper / live         │
+                  └───────┬───────────────┘
+                          ▼
+                  ┌───────────────────────┐
+                  │  Supabase / JSONL     │
+                  │  + runtime state      │
+                  │  + journal            │
+                  └───────────────────────┘
 ```
 
 ## Models
 
 | Model | Role | Output |
 |-------|------|--------|
-| **NHITS** | Multi-horizon price forecast | Expected return (short/medium/long) |
-| **TFT** | Quantile forecast with intervals | Price prediction + uncertainty width |
-| **LightGBM** | Directional classification | Probability of up move |
+| **DSI NHITS** | Remote price forecast | Expected return |
+| **DSI TFT** | Remote forecast with interval hints | Price prediction + stop/target-derived width |
+| **DSI LightGBM** | Remote directional classifier | Directional score |
 | **FinBERT** | News/Reddit sentiment | Sentiment score (-1 to 1) |
 | **iTransformer** | Secondary forecaster (optional) | Expected return |
 | **PPO** | RL meta-controller | Buy/sell/hold action |
@@ -89,7 +83,7 @@ Five rule-based strategies compete for selection via live backtest performance:
 
 ## Risk Management
 
-- Position sizing is determined by ATR-based stop distance and the width of the TFT interval.
+- Position sizing is determined by ATR-based stop distance and DSI TFT interval width or DSI stop/target fallback.
 - Configurable maximum risk per trade, with a default setting of 1%.
 - Daily loss limit set to a default of 3%.
 - Portfolio heat cap set to a default of 10%.
@@ -119,13 +113,13 @@ pip install -r requirements.txt
 
 # Configure
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys, DSI credentials, and API_BEARER_TOKEN
 ```
 
 ### Run
 
 ```bash
-# 1. Bootstrap models (first time — ~15-30 min)
+# 1. Bootstrap local models (FinBERT/PPO/DQN/iTransformer)
 python -m scripts.bootstrap_models
 
 # 2. Start the trading agent
@@ -148,12 +142,17 @@ Key settings in `.env`:
 ```env
 TRADING_MODE=paper          # paper or live
 ENABLE_LIVE_TRADING=false   # extra safety gate
+ALPACA_PAPER=true           # must match TRADING_MODE
 ALLOW_SHORTING=false        # enable short trades
 KILL_SWITCH=false           # emergency halt
+API_BEARER_TOKEN=...        # required outside dev
 MAX_RISK_PER_TRADE=0.01    # 1% per trade
 MAX_DAILY_LOSS_PCT=0.03    # 3% daily loss limit
 WORKER_POLL_MINUTES=60      # cycle frequency
 UNIVERSE=AAPL,MSFT,NVDA,SPY,QQQ
+DSI_BASE_URL=https://...
+DSI_EMAIL=...
+DSI_PASSWORD=...
 ```
 
 See [`.env.example`](.env.example) for all options.
@@ -170,6 +169,9 @@ See [`.env.example`](.env.example) for all options.
 | `GET` | `/api/equity?limit=200` | Equity curve |
 | `GET` | `/api/model-weights` | Current ensemble weights |
 | `GET` | `/api/learning?limit=100` | Learning events log |
+| `GET` | `/api/signals?limit=50` | External website signals |
+| `GET` | `/api/journal?limit=50` | Human-readable trading journal |
+| `POST` | `/api/signals` | Submit an external signal |
 
 ## Project Structure
 
@@ -182,13 +184,13 @@ ai_trading_agent/
 │   ├── db/             # Supabase client + local JSONL fallback
 │   ├── ensemble/       # Dynamic weighted decision engine
 │   ├── execution/      # Alpaca broker integration
-│   ├── models/         # NHITS, TFT, LightGBM, FinBERT, iTransformer
+│   ├── models/         # Local model classes retained for research/testing
 │   ├── risk/           # Position sizing + risk limits
 │   ├── rl/             # PPO, DQN agents + trading environment
 │   ├── strategies/     # Rule-based strategies
 │   ├── training/       # Model bootstrap + nightly retrain
 │   └── utils/          # Logging, math, safe model serialisation
-├── tests/              # Unit tests (59 tests)
+├── tests/              # Unit tests
 ├── scripts/            # Bootstrap + backtest runners
 ├── docs/               # Setup, deployment, live transition guides
 ├── Dockerfile
@@ -200,19 +202,20 @@ ai_trading_agent/
 
 1. Fetch OHLCV data and compute over 30 technical indicators.
 2. Score news and Reddit text using FinBERT.
-3. Generate forecasts with NHITS, TFT, LightGBM, and iTransformer.
+3. Fetch NHITS, TFT, and LightGBM forecasts from DSI, plus local iTransformer when available.
 4. Obtain actions from a reinforcement learning agent using PPO and DQN.
 5. Backtest rule-based strategies to identify the best performer.
 6. Combine all signals into a dynamically weighted ensemble.
-7. Size positions using ATR and TFT uncertainty.
+7. Size positions using ATR and TFT uncertainty or DSI stop/target fallback.
 8. Submit bracket orders, including stop loss and take profit.
 9. Log all activities to Supabase.
 10. Retrain models nightly.
 
 ## Safety
 
-- **Paper-first**: Live trading requires both `TRADING_MODE=live` and `ENABLE_LIVE_TRADING=true`, plus 30 days of paper trading history
+- **Paper-first**: Live trading requires `TRADING_MODE=live`, `ENABLE_LIVE_TRADING=true`, `ALPACA_PAPER=false`, and 30 days of paper trading history
 - **Kill switch**: Set `KILL_SWITCH=true` to instantly halt all trading
+- **API protection**: Set `API_BEARER_TOKEN` before exposing `/api/*` outside local dev
 - **Model integrity**: All saved models are verified with HMAC-SHA256 checksums
 - **Graceful shutdown**: Handles SIGTERM/SIGINT for clean Docker stops
 - **Fallback logging**: If Supabase is unreachable, data is saved locally as JSONL

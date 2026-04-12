@@ -27,6 +27,8 @@ client = TestClient(app)
 def reset_server_settings(monkeypatch):
     monkeypatch.setattr(server.settings, "api_bearer_token", "")
     monkeypatch.setattr(server.settings, "worker_heartbeat_tolerance_minutes", 90)
+    monkeypatch.setattr(server.broker, "client", None)
+    monkeypatch.setattr(server.repository, "client", None)
 
 
 class TestSubmitSignal:

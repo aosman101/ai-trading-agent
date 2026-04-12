@@ -21,17 +21,20 @@ Fill in:
 - `ALPACA_SECRET_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_KEY`
+- `API_BEARER_TOKEN` if you plan to expose the API outside local dev
 
 Optional but useful:
 
 - `ALPHA_VANTAGE_API_KEY` for news sentiment feed
 - `FRED_API_KEY` for macro indicators
 - `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` for Reddit sentiment
+- `DSI_BASE_URL`, `DSI_EMAIL`, `DSI_PASSWORD` if you want remote NHITS/TFT/LightGBM forecasts
 
 Keep these values for the first run:
 
 - `TRADING_MODE=paper`
 - `ENABLE_LIVE_TRADING=false`
+- `ALPACA_PAPER=true`
 - `ALLOW_SHORTING=false`
 
 ## 3) Bootstrap models
@@ -40,15 +43,13 @@ Keep these values for the first run:
 python scripts/bootstrap_models.py
 ```
 
-This trains:
+This bootstraps the local runtime models:
 
-- NHITS
-- LightGBM
-- TFT
 - PPO
 - DQN
+- iTransformer when available
 
-FinBERT is loaded from Hugging Face and used directly for inference.
+FinBERT is loaded from Hugging Face for inference. NHITS, TFT, and LightGBM are now fetched from DSI when DSI credentials are configured.
 
 ## 4) Run backtests
 
@@ -65,6 +66,8 @@ uvicorn app.api.server:app --host 0.0.0.0 --port 8000
 ```
 
 Open `http://localhost:8000`.
+
+If `API_BEARER_TOKEN` is set, open `http://localhost:8000/?token=YOUR_TOKEN`.
 
 ## 6) Start the worker
 

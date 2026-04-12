@@ -17,7 +17,10 @@ If you want faster TFT / FinBERT work, add a separate GPU training worker later.
 1. Install Docker and Docker Compose.
 2. Copy the project to the server.
 3. Create a `.env` file from `.env.example`.
-4. Run:
+4. Set `API_BEARER_TOKEN` before exposing the API outside local development.
+5. Make sure `TRADING_MODE` and `ALPACA_PAPER` match.
+6. If you want DSI forecasts active, set all of `DSI_BASE_URL`, `DSI_EMAIL`, and `DSI_PASSWORD`.
+7. Run:
 
 ```bash
 docker compose up -d --build
@@ -46,6 +49,9 @@ report meaningful health information even when it runs on a separate host.
 
 - Put the API behind Nginx or Caddy with HTTPS.
 - Restrict dashboard access with auth.
+- Set `API_BEARER_TOKEN` and pass it to the dashboard as `?token=...` or via browser local storage.
+- Keep `TRADING_MODE=paper`, `ENABLE_LIVE_TRADING=false`, and `ALPACA_PAPER=true` for first cloud rollout.
+- Treat `/health` as the deployment health probe. It now returns `503` when the worker heartbeat is stale or core dependencies are degraded.
 - Store secrets in a vault or cloud secret manager.
 - Enable server monitoring and disk alerts.
 - Add log shipping if you want long retention.

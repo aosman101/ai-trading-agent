@@ -213,7 +213,7 @@ class FakePredictor:
 
 
 class FakeBacktester:
-    def run_for_symbol(self, symbol: str, sentiment_score=0.0):
+    def run_for_symbol(self, symbol: str, sentiment_score=0.0, frame=None):
         metrics = {
             "momentum": {
                 "sharpe": 1.5,
@@ -297,6 +297,8 @@ def test_run_cycle_for_symbol_uses_dsi_signals_when_available():
     result = orchestrator.run_cycle_for_symbol("AAPL")
 
     assert result["decision"]["direction"] == "long"
+    assert result["status_snapshot"]["dsi_status"]["configured"] is True
+    assert result["status_snapshot"]["dsi_status"]["missing_models"] == []
     logged = orchestrator.repository.predictions_logged[0]
     dsi_signals = {
         signal["name"]: signal
@@ -321,6 +323,7 @@ def test_orchestrator_continues_when_dsi_unavailable():
     result = orchestrator.run_cycle_for_symbol("AAPL")
 
     assert result["decision"]["direction"] in {"long", "short", "flat"}
+    assert result["status_snapshot"]["dsi_status"]["available"] is False
     logged = orchestrator.repository.predictions_logged[0]
     fallback_signals = {
         signal["name"]: signal

@@ -584,13 +584,13 @@ class TradingOrchestrator:
 
         expected_dsi_models = {"nhits", "tft", "lightgbm"}
         received_dsi_models = {s.name for s in dsi_signals}
-        missing = expected_dsi_models - received_dsi_models
+        missing = expected_dsi_models - received_dsi_models if self.dsi_client.configured else set()
         dsi_status.update(
             {
                 "available": bool(dsi_signals),
                 "received_models": sorted(received_dsi_models),
                 "missing_models": sorted(missing),
-                "errors": dict(self.dsi_client.last_fetch_errors),
+                "errors": dict(getattr(self.dsi_client, "last_fetch_errors", {})),
             }
         )
         if missing and self.dsi_client.configured:
