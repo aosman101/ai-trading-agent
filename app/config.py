@@ -79,6 +79,10 @@ class Settings(BaseSettings):
         "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
     )
 
+    dsi_base_url: str = ""
+    dsi_email: str = ""
+    dsi_password: str = ""
+
     finbert_model_name: str = "ProsusAI/finbert"
     hf_device: str = "cpu"
 
