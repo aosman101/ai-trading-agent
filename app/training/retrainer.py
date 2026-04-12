@@ -11,9 +11,6 @@ from app.config import get_settings
 from app.data.market_data import MarketDataService
 from app.models.finbert_sentiment import FinBERTSentimentModel
 from app.models.itransformer_model import ITransformerForecaster
-from app.models.lightgbm_signal import LightGBMSignalModel
-from app.models.nhits_forecaster import NHITSForecaster
-from app.models.tft_model import TFTForecaster
 from app.rl.dqn_agent import DQNTradingAgent
 from app.rl.ppo_agent import PPOTradingAgent
 from app.rl.trading_env import TradingEnvironment
@@ -29,9 +26,6 @@ logger = get_logger(__name__)
 
 @dataclass
 class ModelBundle:
-    nhits: NHITSForecaster
-    lightgbm: LightGBMSignalModel
-    tft: TFTForecaster
     finbert: FinBERTSentimentModel
     ppo: PPOTradingAgent
     dqn: DQNTradingAgent
@@ -48,9 +42,6 @@ class ModelTrainer:
     def _model_files(self) -> dict[str, Path]:
         base = self.settings.model_path
         return {
-            "nhits": base / "nhits.pkl",
-            "lightgbm": base / "lightgbm.pkl",
-            "tft": base / "tft.ckpt",
             "ppo": base / "ppo_agent",
             "dqn": base / "dqn_agent",
             "itransformer": base / "itransformer.pkl",
@@ -93,15 +84,6 @@ class ModelTrainer:
         symbols = list(symbols or self.settings.symbols)
         universe_frame = self.market_data.fetch_universe_history(symbols=symbols)
 
-        nhits = NHITSForecaster()
-        nhits.fit(universe_frame)
-
-        lightgbm = LightGBMSignalModel()
-        lightgbm.fit(universe_frame)
-
-        tft = TFTForecaster()
-        tft.fit(universe_frame)
-
         itransformer = None
         try:
             itransformer = ITransformerForecaster()
@@ -119,9 +101,6 @@ class ModelTrainer:
         finbert = FinBERTSentimentModel()
 
         bundle = ModelBundle(
-            nhits=nhits,
-            lightgbm=lightgbm,
-            tft=tft,
             finbert=finbert,
             ppo=ppo,
             dqn=dqn,
@@ -133,9 +112,6 @@ class ModelTrainer:
 
     def save(self, bundle: ModelBundle) -> None:
         files = self._model_files()
-        bundle.nhits.save(files["nhits"])
-        bundle.lightgbm.save(files["lightgbm"])
-        bundle.tft.save(files["tft"])
         bundle.ppo.save(files["ppo"])
         bundle.dqn.save(files["dqn"])
         if bundle.itransformer is not None:
@@ -143,15 +119,6 @@ class ModelTrainer:
 
     def load(self) -> ModelBundle:
         files = self._model_files()
-
-        nhits = NHITSForecaster()
-        nhits.load(files["nhits"])
-
-        lightgbm = LightGBMSignalModel()
-        lightgbm.load(files["lightgbm"])
-
-        tft = TFTForecaster()
-        tft.load(files["tft"])
 
         ppo = PPOTradingAgent()
         ppo.load(files["ppo"])
@@ -170,9 +137,6 @@ class ModelTrainer:
         finbert = FinBERTSentimentModel()
 
         return ModelBundle(
-            nhits=nhits,
-            lightgbm=lightgbm,
-            tft=tft,
             finbert=finbert,
             ppo=ppo,
             dqn=dqn,
@@ -182,7 +146,7 @@ class ModelTrainer:
 
     def load_or_bootstrap(self, symbols: Iterable[str] | None = None) -> ModelBundle:
         files = self._model_files()
-        required = [files["nhits"], files["lightgbm"], files["tft"], Path(str(files["ppo"]) + ".zip"), Path(str(files["dqn"]) + ".zip")]
+        required = [Path(str(files["ppo"]) + ".zip"), Path(str(files["dqn"]) + ".zip")]
         if all(path.exists() for path in required):
             logger.info("Loading existing trained models from disk")
             return self.load()

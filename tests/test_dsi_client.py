@@ -161,3 +161,15 @@ def test_symbol_mapping_stock_ticker():
     assert DSIClient._map_symbol("AAPL") == "AAPL"
     assert DSIClient._map_symbol("MSFT") == "MSFT"
     assert DSIClient._map_symbol("SPY") == "SPY"
+
+
+def test_model_bundle_no_longer_requires_nhits_tft_lightgbm():
+    from app.training.retrainer import ModelBundle
+    import dataclasses
+    field_names = {f.name for f in dataclasses.fields(ModelBundle)}
+    assert "nhits" not in field_names
+    assert "tft" not in field_names
+    assert "lightgbm" not in field_names
+    assert "finbert" in field_names
+    assert "ppo" in field_names
+    assert "dqn" in field_names
