@@ -227,6 +227,26 @@ class FakeBacktester:
         }
 
 
+class FakeDSIClient:
+    configured = True
+
+    def fetch_all_signals(self, symbol: str):
+        return [
+            ModelSignal(name="nhits", symbol=symbol, direction="long", score=0.02, confidence=0.7,
+                        metadata={"source": "dsi", "current_price": 110.0, "predicted_close": 112.0,
+                                  "signal_strength": 0.6, "stop_loss": 107.0, "take_profit": 116.0,
+                                  "prediction_horizon": "1d"}),
+            ModelSignal(name="tft", symbol=symbol, direction="long", score=0.015, confidence=0.65,
+                        metadata={"source": "dsi", "current_price": 110.0, "predicted_close": 111.5,
+                                  "signal_strength": 0.55, "stop_loss": 108.0, "take_profit": 115.0,
+                                  "prediction_horizon": "1d"}),
+            ModelSignal(name="lightgbm", symbol=symbol, direction="long", score=0.1, confidence=0.6,
+                        metadata={"source": "dsi", "current_price": 110.0, "predicted_close": 111.0,
+                                  "signal_strength": 0.5, "stop_loss": None, "take_profit": None,
+                                  "prediction_horizon": "1d"}),
+        ]
+
+
 def _build_orchestrator() -> TradingOrchestrator:
     orchestrator = TradingOrchestrator.__new__(TradingOrchestrator)
     orchestrator.settings = get_settings()
