@@ -23,6 +23,7 @@ class DSIClient:
         self._base_url = self.settings.dsi_base_url.rstrip("/")
         self._token: Optional[str] = None
         self._token_expiry: float = 0.0
+        self.last_fetch_errors: Dict[str, str] = {}
 
     @property
     def configured(self) -> bool:
@@ -120,6 +121,7 @@ class DSIClient:
     def fetch_all_signals(self, symbol: str) -> list[ModelSignal]:
         """Fetch N-HiTS, TFT, and LightGBM signals. Skip any that fail."""
         signals: list[ModelSignal] = []
+        self.last_fetch_errors = {}
         fetchers = [
             ("nhits", self.fetch_nhits_signal),
             ("tft", self.fetch_tft_signal),
@@ -129,5 +131,6 @@ class DSIClient:
             try:
                 signals.append(fetcher(symbol))
             except Exception as exc:
+                self.last_fetch_errors[model_key] = str(exc)
                 logger.warning("DSI %s prediction failed for %s: %s", model_key, symbol, exc)
         return signals

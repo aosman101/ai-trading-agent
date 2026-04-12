@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,10 +18,11 @@ from app.utils.logging import configure_logging
 from app.utils.time import utc_now_iso
 
 settings = get_settings()
+settings.validate_runtime_configuration(component="api")
 configure_logging(settings.log_level)
 
 app = FastAPI(title="AI Trading Agent Dashboard", version="0.1.0")
-_cors_origins = ["*"] if settings.environment == "dev" else [f"http://localhost:{settings.app_port}"]
+_cors_origins = settings.configured_cors_origins or [f"http://localhost:{settings.app_port}"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -34,6 +36,113 @@ broker = AlpacaBroker()
 
 dashboard_dir = Path(__file__).resolve().parent.parent / "dashboard"
 app.mount("/static", StaticFiles(directory=str(dashboard_dir)), name="static")
+
+
+def _worker_health(worker_status: dict) -> tuple[bool, Optional[str]]:
+    last_cycle_at = worker_status.get("last_cycle_at")
+    if not last_cycle_at:
+        return False, "worker has not completed a cycle yet"
+    try:
+        parsed = datetime.fromisoformat(str(last_cycle_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False, "worker last_cycle_at is not a valid timestamp"
+
+    age_seconds = (datetime.now(timezone.utc) - parsed).total_seconds()
+    if age_seconds > settings.worker_heartbeat_tolerance_minutes * 60:
+        return False, "worker heartbeat is stale"
+    return True, None
+
+
+def _broker_health() -> dict[str, object]:
+    if not broker.is_enabled:
+        return {"enabled": False, "healthy": True, "mode": "simulated", "error": None}
+    try:
+        equity = broker.account_equity()
+        positions = broker.list_open_positions()
+        return {
+            "enabled": True,
+            "healthy": True,
+            "mode": "paper" if settings.alpaca_paper else "live",
+            "equity": equity,
+            "open_positions": positions,
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "healthy": False,
+            "mode": "paper" if settings.alpaca_paper else "live",
+            "error": str(exc),
+        }
+
+
+def _repository_health() -> dict[str, object]:
+    backend = "supabase" if repository.client is not None else "local"
+    if repository.client is None:
+        return {"backend": backend, "healthy": True, "error": None}
+    try:
+        repository.client.table("runtime_state").select("state_key").limit(1).execute()
+        return {"backend": backend, "healthy": True, "error": None}
+    except Exception as exc:
+        return {"backend": backend, "healthy": False, "error": str(exc)}
+
+
+def _normalise_dsi_status(worker_status: dict) -> dict[str, object]:
+    dsi_status = worker_status.get("dsi_status") or {}
+    if not isinstance(dsi_status, dict):
+        dsi_status = {}
+    return {
+        "configured": bool(dsi_status.get("configured", False)),
+        "available": bool(dsi_status.get("available", False)),
+        "received_models": list(dsi_status.get("received_models") or []),
+        "missing_models": list(dsi_status.get("missing_models") or []),
+        "errors": dict(dsi_status.get("errors") or {}),
+    }
+
+
+def _build_status_payload() -> dict[str, object]:
+    snapshot = repository.dashboard_snapshot()
+    worker_status = snapshot.get("worker_status") or {}
+    worker_healthy, worker_error = _worker_health(worker_status)
+    dsi_status = _normalise_dsi_status(worker_status)
+    broker_status = _broker_health()
+    payload = {
+        "trading_mode": settings.trading_mode,
+        "live_enabled": settings.enable_live_trading,
+        "kill_switch": settings.kill_switch,
+        "current_strategy": snapshot.get("current_strategy"),
+        "most_influential_model": snapshot.get("most_influential_model"),
+        "market_regime": worker_status.get("market_regime"),
+        "weight_scope": worker_status.get("weight_scope"),
+        "account_equity": worker_status.get("account_equity", broker.account_equity()),
+        "day_pnl": worker_status.get("day_pnl", broker.day_pnl()),
+        "open_positions": worker_status.get("open_positions", broker.list_open_positions()),
+        "current_portfolio_heat": worker_status.get("current_portfolio_heat"),
+        "worker_healthy": worker_healthy,
+        "worker_error": worker_error,
+        "last_cycle_at": worker_status.get("last_cycle_at"),
+        "last_cycle_symbols": worker_status.get("last_cycle_symbols", []),
+        "last_error": worker_status.get("last_error"),
+        "dsi_status": dsi_status,
+        "broker_status": broker_status,
+        "repository_status": _repository_health(),
+    }
+    return payload
+
+
+def _require_api_auth(authorization: str | None = Header(default=None)) -> None:
+    token = settings.api_bearer_token.strip()
+    if not token:
+        return
+    expected = f"Bearer {token}"
+    if not authorization or not secrets.compare_digest(authorization.strip(), expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @app.get("/")

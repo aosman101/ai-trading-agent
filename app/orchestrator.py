@@ -483,9 +483,10 @@ class TradingOrchestrator:
     def _backtest_metrics_for_symbol(
         self,
         symbol: str,
+        history: pd.DataFrame | None = None,
         sentiment_score: float | pd.Series = 0.0,
     ) -> Dict[str, Dict[str, float]]:
-        results = self.models.backtester.run_for_symbol(symbol, sentiment_score=sentiment_score)
+        results = self.models.backtester.run_for_symbol(symbol, sentiment_score=sentiment_score, frame=history)
         metrics = {}
         for strategy_name, result in results.items():
             metrics[strategy_name] = result.metrics
@@ -564,6 +565,13 @@ class TradingOrchestrator:
 
         # Fetch N-HiTS, TFT, LightGBM from DSI platform
         dsi_signals = []
+        dsi_status = {
+            "configured": self.dsi_client.configured,
+            "available": False,
+            "received_models": [],
+            "missing_models": [],
+            "errors": {},
+        }
         if self.dsi_client.configured:
             dsi_signals = self.dsi_client.fetch_all_signals(symbol)
             if not dsi_signals:
@@ -577,6 +585,14 @@ class TradingOrchestrator:
         expected_dsi_models = {"nhits", "tft", "lightgbm"}
         received_dsi_models = {s.name for s in dsi_signals}
         missing = expected_dsi_models - received_dsi_models
+        dsi_status.update(
+            {
+                "available": bool(dsi_signals),
+                "received_models": sorted(received_dsi_models),
+                "missing_models": sorted(missing),
+                "errors": dict(self.dsi_client.last_fetch_errors),
+            }
+        )
         if missing and self.dsi_client.configured:
             logger.warning("DSI did not return signals for %s: %s — using flat fallbacks", symbol, ", ".join(sorted(missing)))
 
@@ -587,7 +603,7 @@ class TradingOrchestrator:
             except (RuntimeError, ValueError, KeyError, IndexError) as exc:
                 logger.warning("iTransformer prediction failed for %s: %s", symbol, exc)
 
-        strategy_metrics = self._backtest_metrics_for_symbol(symbol, sentiment_score=sentiment_series)
+        strategy_metrics = self._backtest_metrics_for_symbol(symbol, history=history, sentiment_score=sentiment_series)
         strategy_signals = self._make_strategy_signals(history, sentiment_score=finbert_signal.score)
         selected_strategy = self.strategy_selector.select_best(strategy_signals, strategy_metrics)
 
@@ -709,6 +725,7 @@ class TradingOrchestrator:
             "most_influential_model": decision.most_influential_model,
             "market_regime": decision.market_regime,
             "weight_scope": decision.weight_scope,
+            "dsi_status": dsi_status,
             "last_symbol": symbol,
             "last_error": None,
         }

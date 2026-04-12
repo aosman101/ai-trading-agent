@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     app_host: str = "0.0.0.0"
     app_port: int = 8000
+    api_bearer_token: str = ""
+    cors_allowed_origins: str = ""
 
     trading_mode: str = "paper"
     enable_live_trading: bool = False
@@ -117,6 +119,15 @@ class Settings(BaseSettings):
         return [token.strip().upper() for token in self.universe.split(",") if token.strip()]
 
     @property
+    def configured_cors_origins(self) -> List[str]:
+        configured = [token.strip() for token in self.cors_allowed_origins.split(",") if token.strip()]
+        if configured:
+            return configured
+        if self.environment == "dev":
+            return ["*"]
+        return []
+
+    @property
     def model_path(self) -> Path:
         path = Path(self.model_dir)
         path.mkdir(parents=True, exist_ok=True)
@@ -127,6 +138,24 @@ class Settings(BaseSettings):
         path = Path(self.data_dir)
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def validate_runtime_configuration(self, *, component: str | None = None) -> None:
+        dsi_values = [self.dsi_base_url, self.dsi_email, self.dsi_password]
+        configured_dsi_values = [bool(value.strip()) for value in dsi_values]
+        if any(configured_dsi_values) and not all(configured_dsi_values):
+            raise ValueError("DSI configuration must include DSI_BASE_URL, DSI_EMAIL, and DSI_PASSWORD together")
+
+        if self.trading_mode == "paper" and not self.alpaca_paper:
+            raise ValueError("TRADING_MODE=paper requires ALPACA_PAPER=true")
+
+        if self.trading_mode == "live":
+            if self.alpaca_paper:
+                raise ValueError("TRADING_MODE=live requires ALPACA_PAPER=false")
+            if not self.enable_live_trading:
+                raise ValueError("TRADING_MODE=live requires ENABLE_LIVE_TRADING=true")
+
+        if component == "api" and self.environment != "dev" and not self.api_bearer_token.strip():
+            raise ValueError("API_BEARER_TOKEN must be set when ENVIRONMENT is not dev")
 
 
 @lru_cache(maxsize=1)

@@ -100,8 +100,9 @@ class WalkForwardBacktester:
         self,
         symbol: str,
         sentiment_score: float | pd.Series = 0.0,
+        frame: pd.DataFrame | None = None,
     ) -> Dict[str, BacktestResult]:
-        frame = self.market_data.fetch_symbol_history(symbol)
+        frame = frame.copy() if frame is not None else self.market_data.fetch_symbol_history(symbol)
         evaluation_slices = self._evaluation_slices(len(frame))
         results: dict[str, BacktestResult] = {}
         for strategy in self.strategies:
