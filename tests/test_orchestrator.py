@@ -290,6 +290,48 @@ def test_run_cycle_for_symbol_uses_live_state_and_updates_runtime_state():
     assert orchestrator.broker.orders
 
 
+def test_run_cycle_for_symbol_uses_dsi_signals_when_available():
+    orchestrator = _build_orchestrator()
+    orchestrator.dsi_client = FakeDSIClient()
+
+    result = orchestrator.run_cycle_for_symbol("AAPL")
+
+    assert result["decision"]["direction"] == "long"
+    logged = orchestrator.repository.predictions_logged[0]
+    dsi_signals = {
+        signal["name"]: signal
+        for signal in logged["payload"]["model_signals"]
+        if signal["name"] in {"nhits", "tft", "lightgbm"}
+    }
+    assert dsi_signals["nhits"]["metadata"]["source"] == "dsi"
+    assert dsi_signals["tft"]["metadata"]["predicted_close"] == pytest.approx(111.5)
+    assert dsi_signals["lightgbm"]["confidence"] == pytest.approx(0.6)
+
+
+def test_orchestrator_continues_when_dsi_unavailable():
+    class EmptyDSIClient:
+        configured = True
+
+        def fetch_all_signals(self, symbol: str):
+            return []
+
+    orchestrator = _build_orchestrator()
+    orchestrator.dsi_client = EmptyDSIClient()
+
+    result = orchestrator.run_cycle_for_symbol("AAPL")
+
+    assert result["decision"]["direction"] in {"long", "short", "flat"}
+    logged = orchestrator.repository.predictions_logged[0]
+    fallback_signals = {
+        signal["name"]: signal
+        for signal in logged["payload"]["model_signals"]
+        if signal["name"] in {"nhits", "tft", "lightgbm"}
+    }
+    assert fallback_signals["nhits"]["direction"] == "flat"
+    assert fallback_signals["tft"]["confidence"] == pytest.approx(0.0)
+    assert fallback_signals["lightgbm"]["score"] == pytest.approx(0.0)
+
+
 def test_run_cycle_for_symbol_raises_on_empty_history():
     orchestrator = _build_orchestrator()
 
