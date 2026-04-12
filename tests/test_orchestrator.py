@@ -239,10 +239,8 @@ def _build_orchestrator() -> TradingOrchestrator:
     orchestrator.broker = FakeBroker()
     orchestrator.rule_strategies = [FakeStrategy("momentum")]
     orchestrator._model_lock = nullcontext()
+    orchestrator.dsi_client = SimpleNamespace(configured=False)
     orchestrator.models = SimpleNamespace(
-        nhits=FakePredictor("nhits", "long", 0.9, 0.9),
-        lightgbm=FakePredictor("lightgbm", "long", 0.4, 0.6),
-        tft=FakePredictor("tft", "short", -0.2, 0.7, metadata={"interval_width": 1.0}),
         finbert=FakePredictor("finbert", "long", 0.2, 0.6),
         ppo=FakeRLAgent("ppo", "long"),
         dqn=FakeRLAgent("dqn", "long"),

@@ -23,6 +23,7 @@ from app.strategies.sentiment_strategy import SentimentStrategy
 from app.strategies.trend_following import TrendFollowingStrategy
 from app.training.retrainer import ModelBundle, ModelTrainer
 from app.types import ModelSignal, StrategySignal
+from app.data.dsi_client import DSIClient
 from app.utils.logging import get_logger
 from app.utils.time import utc_now_iso
 
@@ -40,6 +41,7 @@ class TradingOrchestrator:
         self.risk_manager = RiskManager()
         self.broker = AlpacaBroker()
         self.model_trainer = ModelTrainer()
+        self.dsi_client = DSIClient()
         self.models: ModelBundle = self.model_trainer.load_or_bootstrap()
         self._model_lock = threading.Lock()
         self._hydrate_model_performance()
@@ -560,9 +562,17 @@ class TradingOrchestrator:
             fallback_latest=finbert_signal.score,
         )
 
-        nhits_signal = models.nhits.predict_latest(history_frame, symbol)
-        lightgbm_signal = models.lightgbm.predict_latest(latest_row)
-        tft_signal = models.tft.predict_latest(history_frame, symbol)
+        # Fetch N-HiTS, TFT, LightGBM from DSI platform
+        dsi_signals = []
+        if self.dsi_client.configured:
+            dsi_signals = self.dsi_client.fetch_all_signals(symbol)
+            if not dsi_signals:
+                logger.warning("DSI returned no signals for %s — continuing with local models only", symbol)
+
+        # Extract individual signals (or create flat fallbacks)
+        nhits_signal = next((s for s in dsi_signals if s.name == "nhits"), ModelSignal(name="nhits", symbol=symbol))
+        tft_signal = next((s for s in dsi_signals if s.name == "tft"), ModelSignal(name="tft", symbol=symbol))
+        lightgbm_signal = next((s for s in dsi_signals if s.name == "lightgbm"), ModelSignal(name="lightgbm", symbol=symbol))
 
         itransformer_signal = None
         if models.itransformer is not None:
@@ -603,7 +613,11 @@ class TradingOrchestrator:
             decision=decision,
             price=latest_price,
             atr=float(latest_row.get("atr_14", latest_price * 0.01)),
-            interval_width=float(tft_signal.metadata.get("interval_width", latest_price * 0.01)),
+            interval_width=float(
+                tft_signal.metadata.get("interval_width")
+                or abs((tft_signal.metadata.get("take_profit") or latest_price * 1.01) - (tft_signal.metadata.get("stop_loss") or latest_price * 0.99))
+                or latest_price * 0.01
+            ),
             equity=equity,
             current_daily_pnl=daily_pnl,
             open_positions=open_positions,
