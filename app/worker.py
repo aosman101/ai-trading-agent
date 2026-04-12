@@ -14,6 +14,7 @@ logger = get_logger(__name__)
 
 def main() -> None:
     settings = get_settings()
+    settings.validate_runtime_configuration(component="worker")
     configure_logging(settings.log_level)
     orchestrator = TradingOrchestrator()
 

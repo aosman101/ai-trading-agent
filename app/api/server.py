@@ -108,6 +108,9 @@ def _build_status_payload() -> dict[str, object]:
     worker_healthy, worker_error = _worker_health(worker_status)
     dsi_status = _normalise_dsi_status(worker_status)
     broker_status = _broker_health()
+    account_equity = worker_status.get("account_equity", broker_status.get("equity", settings.paper_equity_fallback))
+    open_positions = worker_status.get("open_positions", broker_status.get("open_positions", {}))
+    day_pnl = worker_status.get("day_pnl", 0.0)
     payload = {
         "trading_mode": settings.trading_mode,
         "live_enabled": settings.enable_live_trading,
@@ -116,9 +119,9 @@ def _build_status_payload() -> dict[str, object]:
         "most_influential_model": snapshot.get("most_influential_model"),
         "market_regime": worker_status.get("market_regime"),
         "weight_scope": worker_status.get("weight_scope"),
-        "account_equity": worker_status.get("account_equity", broker.account_equity()),
-        "day_pnl": worker_status.get("day_pnl", broker.day_pnl()),
-        "open_positions": worker_status.get("open_positions", broker.list_open_positions()),
+        "account_equity": account_equity,
+        "day_pnl": day_pnl,
+        "open_positions": open_positions,
         "current_portfolio_heat": worker_status.get("current_portfolio_heat"),
         "worker_healthy": worker_healthy,
         "worker_error": worker_error,
@@ -151,74 +154,65 @@ def index() -> FileResponse:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> JSONResponse:
+    payload = _build_status_payload()
+    worker_ok = bool(payload.get("worker_healthy"))
+    repository_ok = bool((payload.get("repository_status") or {}).get("healthy", False))
+    broker_ok = bool((payload.get("broker_status") or {}).get("healthy", False))
+    dsi_status = payload.get("dsi_status") or {}
+    dsi_required = bool(dsi_status.get("configured"))
+    dsi_ok = (not dsi_required) or (
+        bool(dsi_status.get("available"))
+        and not dsi_status.get("missing_models")
+        and not dsi_status.get("errors")
+    )
+    overall_ok = worker_ok and repository_ok and broker_ok and dsi_ok
+    health_payload = {
+        "status": "ok" if overall_ok else "degraded",
+        "worker_healthy": worker_ok,
+        "repository_healthy": repository_ok,
+        "broker_healthy": broker_ok,
+        "dsi_healthy": dsi_ok,
+        "details": payload,
+    }
+    return JSONResponse(
+        health_payload,
+        status_code=status.HTTP_200_OK if overall_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 @app.get("/api/status")
-def status() -> JSONResponse:
-    snapshot = repository.dashboard_snapshot()
-    worker_status = snapshot.get("worker_status") or {}
-    last_cycle_at = worker_status.get("last_cycle_at")
-    worker_healthy = False
-    if last_cycle_at:
-        try:
-            parsed = datetime.fromisoformat(str(last_cycle_at).replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            worker_healthy = (
-                (datetime.now(timezone.utc) - parsed).total_seconds()
-                <= settings.worker_heartbeat_tolerance_minutes * 60
-            )
-        except ValueError:
-            worker_healthy = False
-    payload = {
-        "trading_mode": settings.trading_mode,
-        "live_enabled": settings.enable_live_trading,
-        "kill_switch": settings.kill_switch,
-        "current_strategy": snapshot.get("current_strategy"),
-        "most_influential_model": snapshot.get("most_influential_model"),
-        "market_regime": worker_status.get("market_regime"),
-        "weight_scope": worker_status.get("weight_scope"),
-        "account_equity": worker_status.get("account_equity", broker.account_equity()),
-        "day_pnl": worker_status.get("day_pnl", broker.day_pnl()),
-        "open_positions": worker_status.get("open_positions", broker.list_open_positions()),
-        "current_portfolio_heat": worker_status.get("current_portfolio_heat"),
-        "worker_healthy": worker_healthy,
-        "last_cycle_at": last_cycle_at,
-        "last_cycle_symbols": worker_status.get("last_cycle_symbols", []),
-        "last_error": worker_status.get("last_error"),
-    }
-    return JSONResponse(payload)
+def status(_: None = Depends(_require_api_auth)) -> JSONResponse:
+    return JSONResponse(_build_status_payload())
 
 
 @app.get("/api/dashboard")
-def dashboard() -> JSONResponse:
+def dashboard(_: None = Depends(_require_api_auth)) -> JSONResponse:
     return JSONResponse(repository.dashboard_snapshot())
 
 
 @app.get("/api/trades")
-def trades(limit: int = Query(default=50, ge=1, le=500)) -> JSONResponse:
+def trades(limit: int = Query(default=50, ge=1, le=500), _: None = Depends(_require_api_auth)) -> JSONResponse:
     return JSONResponse(repository.recent_trades(limit=limit))
 
 
 @app.get("/api/predictions")
-def predictions(limit: int = Query(default=50, ge=1, le=500)) -> JSONResponse:
+def predictions(limit: int = Query(default=50, ge=1, le=500), _: None = Depends(_require_api_auth)) -> JSONResponse:
     return JSONResponse(repository.recent_predictions(limit=limit))
 
 
 @app.get("/api/equity")
-def equity(limit: int = Query(default=200, ge=1, le=1000)) -> JSONResponse:
+def equity(limit: int = Query(default=200, ge=1, le=1000), _: None = Depends(_require_api_auth)) -> JSONResponse:
     return JSONResponse(repository.equity_curve(limit=limit))
 
 
 @app.get("/api/model-weights")
-def model_weights() -> JSONResponse:
+def model_weights(_: None = Depends(_require_api_auth)) -> JSONResponse:
     return JSONResponse(repository.latest_model_weights())
 
 
 @app.get("/api/learning")
-def learning(limit: int = Query(default=100, ge=1, le=500)) -> JSONResponse:
+def learning(limit: int = Query(default=100, ge=1, le=500), _: None = Depends(_require_api_auth)) -> JSONResponse:
     return JSONResponse(repository.learning_progress(limit=limit))
 
 
@@ -237,7 +231,7 @@ class ExternalSignalRequest(BaseModel):
 
 
 @app.post("/api/signals")
-def submit_signal(signal: ExternalSignalRequest) -> JSONResponse:
+def submit_signal(signal: ExternalSignalRequest, _: None = Depends(_require_api_auth)) -> JSONResponse:
     """Accept an external prediction from the website.
 
     The agent will consume it on the next cycle for this symbol and blend it
@@ -265,6 +259,7 @@ def submit_signal(signal: ExternalSignalRequest) -> JSONResponse:
 def list_signals(
     limit: int = Query(default=50, ge=1, le=500),
     symbol: Optional[str] = Query(default=None),
+    _: None = Depends(_require_api_auth),
 ) -> JSONResponse:
     """List recent external signals (both pending and consumed)."""
     rows = repository.list_external_signals(limit=limit)
@@ -282,6 +277,7 @@ def list_signals(
 def journal(
     limit: int = Query(default=50, ge=1, le=200),
     symbol: Optional[str] = Query(default=None),
+    _: None = Depends(_require_api_auth),
 ) -> JSONResponse:
     """Return the agent's trading journal — detailed human-readable entries.
 
