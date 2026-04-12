@@ -450,9 +450,6 @@ def test_journal_skipped_trade_shows_reasons():
     orchestrator = _build_orchestrator()
     # Force a flat decision by making all models flat and removing confident strategies
     orchestrator.models = SimpleNamespace(
-        nhits=FakePredictor("nhits", "flat", 0.0, 0.3),
-        lightgbm=FakePredictor("lightgbm", "flat", 0.0, 0.3),
-        tft=FakePredictor("tft", "flat", 0.0, 0.3, metadata={"interval_width": 1.0}),
         finbert=FakePredictor("finbert", "flat", 0.0, 0.3),
         ppo=FakeRLAgent("ppo", "flat"),
         dqn=FakeRLAgent("dqn", "flat"),

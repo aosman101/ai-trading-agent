@@ -9,6 +9,7 @@ import pandas as pd
 
 from app.backtesting.metrics import max_drawdown, sharpe_ratio
 from app.config import get_settings
+from app.data.dsi_client import DSIClient
 from app.data.market_data import MarketDataService
 from app.data.news_data import NewsDataService
 from app.db.supabase_client import TradeRepository
@@ -23,7 +24,6 @@ from app.strategies.sentiment_strategy import SentimentStrategy
 from app.strategies.trend_following import TrendFollowingStrategy
 from app.training.retrainer import ModelBundle, ModelTrainer
 from app.types import ModelSignal, StrategySignal
-from app.data.dsi_client import DSIClient
 from app.utils.logging import get_logger
 from app.utils.time import utc_now_iso
 
@@ -567,12 +567,18 @@ class TradingOrchestrator:
         if self.dsi_client.configured:
             dsi_signals = self.dsi_client.fetch_all_signals(symbol)
             if not dsi_signals:
-                logger.warning("DSI returned no signals for %s — continuing with local models only", symbol)
+                logger.warning("DSI returned no signals for %s — nhits/tft/lightgbm will be flat (zero confidence)", symbol)
 
         # Extract individual signals (or create flat fallbacks)
         nhits_signal = next((s for s in dsi_signals if s.name == "nhits"), ModelSignal(name="nhits", symbol=symbol))
         tft_signal = next((s for s in dsi_signals if s.name == "tft"), ModelSignal(name="tft", symbol=symbol))
         lightgbm_signal = next((s for s in dsi_signals if s.name == "lightgbm"), ModelSignal(name="lightgbm", symbol=symbol))
+
+        expected_dsi_models = {"nhits", "tft", "lightgbm"}
+        received_dsi_models = {s.name for s in dsi_signals}
+        missing = expected_dsi_models - received_dsi_models
+        if missing and self.dsi_client.configured:
+            logger.warning("DSI did not return signals for %s: %s — using flat fallbacks", symbol, ", ".join(sorted(missing)))
 
         itransformer_signal = None
         if models.itransformer is not None:
