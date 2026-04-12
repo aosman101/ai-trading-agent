@@ -144,6 +144,12 @@ class Settings(BaseSettings):
         configured_dsi_values = [bool(value.strip()) for value in dsi_values]
         if any(configured_dsi_values) and not all(configured_dsi_values):
             raise ValueError("DSI configuration must include DSI_BASE_URL, DSI_EMAIL, and DSI_PASSWORD together")
+        if (
+            self.environment != "dev"
+            and self.dsi_base_url.strip()
+            and not self.dsi_base_url.strip().lower().startswith("https://")
+        ):
+            raise ValueError("DSI_BASE_URL must use https outside dev")
 
         if self.trading_mode == "paper" and not self.alpaca_paper:
             raise ValueError("TRADING_MODE=paper requires ALPACA_PAPER=true")

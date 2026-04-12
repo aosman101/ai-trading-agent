@@ -12,7 +12,12 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-_SECRET = os.environ.get("MODEL_HMAC_SECRET", "ai-trading-agent-default-key").encode()
+_DEFAULT_SECRET = "ai-trading-agent-default-key"
+_ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev").strip().lower()
+_SECRET_VALUE = os.environ.get("MODEL_HMAC_SECRET", _DEFAULT_SECRET)
+if _ENVIRONMENT != "dev" and _SECRET_VALUE == _DEFAULT_SECRET:
+    raise RuntimeError("MODEL_HMAC_SECRET must be set outside dev")
+_SECRET = _SECRET_VALUE.encode()
 _HASH_SUFFIX = ".sha256"
 
 

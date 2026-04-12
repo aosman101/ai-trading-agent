@@ -173,7 +173,6 @@ def health() -> JSONResponse:
         "repository_healthy": repository_ok,
         "broker_healthy": broker_ok,
         "dsi_healthy": dsi_ok,
-        "details": payload,
     }
     return JSONResponse(
         health_payload,

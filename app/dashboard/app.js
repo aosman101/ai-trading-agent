@@ -32,6 +32,9 @@ function getApiToken() {
   const token = query.get("token") || hash.get("token") || window.localStorage.getItem("dashboardApiToken");
   if (token) {
     window.localStorage.setItem("dashboardApiToken", token);
+    if (query.get("token") || hash.get("token")) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
     return token;
   }
   return "";

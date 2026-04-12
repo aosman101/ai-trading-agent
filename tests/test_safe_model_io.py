@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import importlib
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -49,3 +48,16 @@ class TestSafeModelIO:
         loaded = load_model(path)
         assert (loaded["array"] == data["array"]).all()
         assert loaded["nested"] == data["nested"]
+
+    def test_non_dev_requires_explicit_model_hmac_secret(self, monkeypatch):
+        monkeypatch.setenv("ENVIRONMENT", "prod")
+        monkeypatch.delenv("MODEL_HMAC_SECRET", raising=False)
+
+        import app.utils.safe_model_io as safe_model_io_module
+
+        with pytest.raises(RuntimeError, match="MODEL_HMAC_SECRET must be set outside dev"):
+            importlib.reload(safe_model_io_module)
+
+        monkeypatch.setenv("ENVIRONMENT", "dev")
+        monkeypatch.delenv("MODEL_HMAC_SECRET", raising=False)
+        importlib.reload(safe_model_io_module)

@@ -40,3 +40,16 @@ def test_api_runtime_validation_requires_token_in_non_dev():
 
     with pytest.raises(ValueError, match="API_BEARER_TOKEN must be set"):
         settings.validate_runtime_configuration(component="api")
+
+
+def test_runtime_validation_requires_https_dsi_in_non_dev():
+    settings = Settings(
+        environment="prod",
+        api_bearer_token="token",
+        dsi_base_url="http://dsi.example.com",
+        dsi_email="user@example.com",
+        dsi_password="secret",
+    )
+
+    with pytest.raises(ValueError, match="DSI_BASE_URL must use https outside dev"):
+        settings.validate_runtime_configuration(component="api")

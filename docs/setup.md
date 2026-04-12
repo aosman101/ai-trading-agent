@@ -22,6 +22,7 @@ Fill in:
 - `SUPABASE_URL`
 - `SUPABASE_KEY`
 - `API_BEARER_TOKEN` if you plan to expose the API outside local dev
+- `MODEL_HMAC_SECRET` for model artifact integrity outside local dev
 
 Optional but useful:
 

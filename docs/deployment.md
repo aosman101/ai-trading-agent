@@ -19,8 +19,9 @@ If you want faster TFT / FinBERT work, add a separate GPU training worker later.
 3. Create a `.env` file from `.env.example`.
 4. Set `API_BEARER_TOKEN` before exposing the API outside local development.
 5. Make sure `TRADING_MODE` and `ALPACA_PAPER` match.
-6. If you want DSI forecasts active, set all of `DSI_BASE_URL`, `DSI_EMAIL`, and `DSI_PASSWORD`.
-7. Run:
+6. Set `MODEL_HMAC_SECRET` so model integrity checks do not rely on the development default.
+7. If you want DSI forecasts active, set all of `DSI_BASE_URL`, `DSI_EMAIL`, and `DSI_PASSWORD`, and use `https`.
+8. Run:
 
 ```bash
 docker compose up -d --build

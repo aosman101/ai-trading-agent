@@ -114,6 +114,7 @@ pip install -r requirements.txt
 # Configure
 cp .env.example .env
 # Edit .env with your API keys, DSI credentials, and API_BEARER_TOKEN
+# Set MODEL_HMAC_SECRET outside local dev
 ```
 
 ### Run
@@ -146,6 +147,7 @@ ALPACA_PAPER=true           # must match TRADING_MODE
 ALLOW_SHORTING=false        # enable short trades
 KILL_SWITCH=false           # emergency halt
 API_BEARER_TOKEN=...        # required outside dev
+MODEL_HMAC_SECRET=...       # required outside dev
 MAX_RISK_PER_TRADE=0.01    # 1% per trade
 MAX_DAILY_LOSS_PCT=0.03    # 3% daily loss limit
 WORKER_POLL_MINUTES=60      # cycle frequency
@@ -216,6 +218,7 @@ ai_trading_agent/
 - **Paper-first**: Live trading requires `TRADING_MODE=live`, `ENABLE_LIVE_TRADING=true`, `ALPACA_PAPER=false`, and 30 days of paper trading history
 - **Kill switch**: Set `KILL_SWITCH=true` to instantly halt all trading
 - **API protection**: Set `API_BEARER_TOKEN` before exposing `/api/*` outside local dev
+- **Model artifact integrity**: Set `MODEL_HMAC_SECRET` outside local dev so HMAC checks are not using the development default
 - **Model integrity**: All saved models are verified with HMAC-SHA256 checksums
 - **Graceful shutdown**: Handles SIGTERM/SIGINT for clean Docker stops
 - **Fallback logging**: If Supabase is unreachable, data is saved locally as JSONL
