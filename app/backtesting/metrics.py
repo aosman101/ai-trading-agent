@@ -6,9 +6,12 @@ import pandas as pd
 
 def sharpe_ratio(returns: pd.Series, periods_per_year: int = 252) -> float:
     returns = returns.dropna()
-    if returns.empty or returns.std(ddof=0) == 0:
+    if len(returns) < 2:
         return 0.0
-    return float(np.sqrt(periods_per_year) * returns.mean() / returns.std(ddof=0))
+    std = returns.std(ddof=1)
+    if std == 0 or pd.isna(std):
+        return 0.0
+    return float(np.sqrt(periods_per_year) * returns.mean() / std)
 
 
 def max_drawdown(equity_curve: pd.Series) -> float:

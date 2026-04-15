@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -12,10 +14,29 @@ from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+_NEWS_CACHE_TTL_SEC = 1800  # 30 minutes — news doesn't change every cycle
+
 
 class NewsDataService:
     def __init__(self) -> None:
         self.settings = get_settings()
+        self._cache: dict[tuple[str, str], tuple[float, Any]] = {}
+        self._cache_lock = threading.Lock()
+
+    def _cache_get(self, key: tuple[str, str]) -> Any | None:
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if not entry:
+                return None
+            timestamp, value = entry
+            if time.monotonic() - timestamp > _NEWS_CACHE_TTL_SEC:
+                self._cache.pop(key, None)
+                return None
+            return value
+
+    def _cache_set(self, key: tuple[str, str], value: Any) -> None:
+        with self._cache_lock:
+            self._cache[key] = (time.monotonic(), value)
 
     def fetch_alpha_vantage_news(self, symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
         if not self.settings.alpha_vantage_api_key:

@@ -313,12 +313,28 @@ class TradingOrchestrator:
         current["heartbeat_at"] = utc_now_iso()
         self.repository.write_runtime_state("worker_status", current)
 
-    def _combine_rl_agents(self, symbol: str, observation: np.ndarray, models: ModelBundle | None = None) -> ModelSignal:
+    def _combine_rl_agents(
+        self,
+        symbol: str,
+        observation: np.ndarray,
+        models: ModelBundle | None = None,
+        regime: str | None = None,
+    ) -> ModelSignal:
         models = models or self.models
         ppo_signal = models.ppo.predict(observation, symbol=symbol)
         dqn_signal = models.dqn.predict(observation, symbol=symbol)
-        combined_score = (0.60 * ppo_signal.score) + (0.40 * dqn_signal.score)
-        combined_confidence = (0.60 * ppo_signal.confidence) + (0.40 * dqn_signal.confidence)
+        learned_weights = self.decision_engine.current_weights(
+            ["ppo", "dqn"], symbol=symbol, regime=regime
+        )
+        ppo_weight = float(learned_weights.get("ppo", 0.5))
+        dqn_weight = float(learned_weights.get("dqn", 0.5))
+        total_weight = ppo_weight + dqn_weight
+        if total_weight <= 0:
+            ppo_weight, dqn_weight, total_weight = 0.5, 0.5, 1.0
+        ppo_weight /= total_weight
+        dqn_weight /= total_weight
+        combined_score = (ppo_weight * ppo_signal.score) + (dqn_weight * dqn_signal.score)
+        combined_confidence = (ppo_weight * ppo_signal.confidence) + (dqn_weight * dqn_signal.confidence)
         direction = "flat"
         if combined_score > 0.10:
             direction = "long"
@@ -333,6 +349,8 @@ class TradingOrchestrator:
             metadata={
                 "ppo_action": ppo_signal.metadata.get("action"),
                 "dqn_action": dqn_signal.metadata.get("action"),
+                "ppo_weight": ppo_weight,
+                "dqn_weight": dqn_weight,
             },
         )
 
@@ -608,7 +626,7 @@ class TradingOrchestrator:
         selected_strategy = self.strategy_selector.select_best(strategy_signals, strategy_metrics)
 
         observation = self._build_live_rl_observation(history_frame, live_state)
-        rl_signal = self._combine_rl_agents(symbol, observation, models=models)
+        rl_signal = self._combine_rl_agents(symbol, observation, models=models, regime=market_regime)
 
         model_signals = [
             nhits_signal,

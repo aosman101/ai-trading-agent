@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import secrets
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,10 +26,11 @@ configure_logging(settings.log_level)
 
 app = FastAPI(title="AI Trading Agent Dashboard", version="0.1.0")
 _cors_origins = settings.configured_cors_origins or [f"http://localhost:{settings.app_port}"]
+_cors_wildcard = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -227,15 +231,64 @@ class ExternalSignalRequest(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     source: str = "website"
     reasoning: Optional[str] = None
+    idempotency_key: Optional[str] = Field(default=None, max_length=128)
+
+
+_SIGNAL_RATE_LIMIT_PER_MIN = 30
+_SIGNAL_IDEMPOTENCY_TTL_SEC = 3600
+_signal_rate_state: dict[str, deque[float]] = {}
+_signal_idempotency_state: dict[tuple[str, str], float] = {}
+_signal_state_lock = threading.Lock()
+
+
+def _enforce_signal_rate_limit(request: Request) -> None:
+    caller = (request.client.host if request.client else "anonymous") or "anonymous"
+    now = time.monotonic()
+    window_start = now - 60.0
+    with _signal_state_lock:
+        bucket = _signal_rate_state.setdefault(caller, deque())
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if len(bucket) >= _SIGNAL_RATE_LIMIT_PER_MIN:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many signal submissions. Try again in a minute.",
+            )
+        bucket.append(now)
+
+
+def _claim_idempotency_key(source: str, key: str) -> bool:
+    """Return True if (source, key) is fresh; False if seen within TTL."""
+    now = time.monotonic()
+    expiry_cutoff = now - _SIGNAL_IDEMPOTENCY_TTL_SEC
+    with _signal_state_lock:
+        stale = [k for k, ts in _signal_idempotency_state.items() if ts < expiry_cutoff]
+        for k in stale:
+            _signal_idempotency_state.pop(k, None)
+        composite = (source, key)
+        if composite in _signal_idempotency_state:
+            return False
+        _signal_idempotency_state[composite] = now
+        return True
 
 
 @app.post("/api/signals")
-def submit_signal(signal: ExternalSignalRequest, _: None = Depends(_require_api_auth)) -> JSONResponse:
+def submit_signal(
+    signal: ExternalSignalRequest,
+    request: Request,
+    _: None = Depends(_require_api_auth),
+) -> JSONResponse:
     """Accept an external prediction from the website.
 
     The agent will consume it on the next cycle for this symbol and blend it
     into the ensemble alongside its own models.
     """
+    _enforce_signal_rate_limit(request)
+    if signal.idempotency_key and not _claim_idempotency_key(signal.source, signal.idempotency_key):
+        return JSONResponse(
+            {"status": "duplicate", "symbol": signal.symbol.upper(), "direction": signal.direction},
+            status_code=200,
+        )
     record = {
         "created_at": utc_now_iso(),
         "symbol": signal.symbol.upper(),
@@ -245,7 +298,7 @@ def submit_signal(signal: ExternalSignalRequest, _: None = Depends(_require_api_
         "source": signal.source,
         "reasoning": signal.reasoning,
         "consumed_at": None,
-        "payload": {},
+        "payload": {"idempotency_key": signal.idempotency_key} if signal.idempotency_key else {},
     }
     repository.submit_external_signal(record)
     return JSONResponse(

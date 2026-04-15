@@ -31,6 +31,11 @@ class AlpacaBroker:
 
     def account_equity(self) -> float:
         if not self.client:
+            if self.settings.environment != "dev":
+                raise RuntimeError(
+                    "Alpaca broker is not configured. Refusing to return paper_equity_fallback "
+                    "outside dev to avoid sizing trades against phantom capital."
+                )
             return self.settings.paper_equity_fallback
         account = self.client.get_account()
         return float(account.equity)
