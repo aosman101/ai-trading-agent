@@ -80,7 +80,7 @@ class ModelTrainer:
         ]
         return work.dropna().copy(), feature_columns
 
-    def bootstrap_all(self, symbols: Iterable[str] | None = None) -> ModelBundle:
+    def bootstrap_all(self, symbols: Iterable[str] | None = None, *, persist: bool = True) -> ModelBundle:
         symbols = list(symbols or self.settings.symbols)
         universe_frame = self.market_data.fetch_universe_history(symbols=symbols)
 
@@ -107,7 +107,8 @@ class ModelTrainer:
             itransformer=itransformer,
             backtester=self.backtester,
         )
-        self.save(bundle)
+        if persist:
+            self.save(bundle)
         return bundle
 
     def save(self, bundle: ModelBundle) -> None:

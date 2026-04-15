@@ -119,6 +119,10 @@ class Settings(BaseSettings):
         return [token.strip().upper() for token in self.universe.split(",") if token.strip()]
 
     @property
+    def dsi_configured(self) -> bool:
+        return all(value.strip() for value in (self.dsi_base_url, self.dsi_email, self.dsi_password))
+
+    @property
     def configured_cors_origins(self) -> List[str]:
         configured = [token.strip() for token in self.cors_allowed_origins.split(",") if token.strip()]
         if configured:
@@ -142,7 +146,7 @@ class Settings(BaseSettings):
     def validate_runtime_configuration(self, *, component: str | None = None) -> None:
         dsi_values = [self.dsi_base_url, self.dsi_email, self.dsi_password]
         configured_dsi_values = [bool(value.strip()) for value in dsi_values]
-        if any(configured_dsi_values) and not all(configured_dsi_values):
+        if any(configured_dsi_values) and not all(configured_dsi_values) and self.environment != "dev":
             raise ValueError("DSI configuration must include DSI_BASE_URL, DSI_EMAIL, and DSI_PASSWORD together")
         if (
             self.environment != "dev"

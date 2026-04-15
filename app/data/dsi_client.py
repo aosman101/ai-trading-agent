@@ -27,7 +27,7 @@ class DSIClient:
 
     @property
     def configured(self) -> bool:
-        return bool(self._base_url and self.settings.dsi_email and self.settings.dsi_password)
+        return self.settings.dsi_configured
 
     def _authenticate(self) -> None:
         if self._token and time.time() < self._token_expiry:
