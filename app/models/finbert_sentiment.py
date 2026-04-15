@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import threading
+from collections import OrderedDict
 from typing import Iterable, List
 
 from app.config import get_settings
@@ -7,6 +10,8 @@ from app.types import ModelSignal
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+_TEXT_CACHE_MAX = 2048
 
 
 class FinBERTSentimentModel:
@@ -25,6 +30,8 @@ class FinBERTSentimentModel:
             device=device,
             truncation=True,
         )
+        self._text_cache: "OrderedDict[str, float]" = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     @staticmethod
     def _label_to_score(label: str, confidence: float) -> float:
@@ -35,12 +42,45 @@ class FinBERTSentimentModel:
             return -confidence
         return 0.0
 
+    @staticmethod
+    def _text_key(text: str) -> str:
+        return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _cache_get(self, key: str) -> float | None:
+        with self._cache_lock:
+            value = self._text_cache.get(key)
+            if value is not None:
+                self._text_cache.move_to_end(key)
+            return value
+
+    def _cache_put(self, key: str, value: float) -> None:
+        with self._cache_lock:
+            self._text_cache[key] = value
+            self._text_cache.move_to_end(key)
+            while len(self._text_cache) > _TEXT_CACHE_MAX:
+                self._text_cache.popitem(last=False)
+
     def score_texts(self, texts: Iterable[str]) -> float:
-        batch = [text[:2000] for text in texts if text]
-        if not batch:
+        truncated = [text[:2000] for text in texts if text]
+        if not truncated:
             return 0.0
-        results = self.pipeline(batch)
-        scores = [self._label_to_score(item["label"], float(item["score"])) for item in results]
+        scores: list[float] = []
+        uncached_texts: list[str] = []
+        uncached_keys: list[str] = []
+        for text in truncated:
+            key = self._text_key(text)
+            cached = self._cache_get(key)
+            if cached is not None:
+                scores.append(cached)
+            else:
+                uncached_texts.append(text)
+                uncached_keys.append(key)
+        if uncached_texts:
+            results = self.pipeline(uncached_texts)
+            for key, item in zip(uncached_keys, results):
+                value = self._label_to_score(item["label"], float(item["score"]))
+                self._cache_put(key, value)
+                scores.append(value)
         if not scores:
             return 0.0
         return float(sum(scores) / len(scores))

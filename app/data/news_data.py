@@ -41,19 +41,23 @@ class NewsDataService:
     def fetch_alpha_vantage_news(self, symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
         if not self.settings.alpha_vantage_api_key:
             return []
+        cache_key = ("alpha_vantage", symbol.upper())
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached[:limit]
         url = "https://www.alphavantage.co/query"
         params = {
             "function": "NEWS_SENTIMENT",
             "tickers": symbol,
             "apikey": self.settings.alpha_vantage_api_key,
-            "limit": limit,
+            "limit": 200,
         }
         try:
             response = httpx.get(url, params=params, timeout=30.0)
             response.raise_for_status()
             payload = response.json()
             rows = payload.get("feed", [])
-            return [
+            result = [
                 {
                     "title": item.get("title", ""),
                     "summary": item.get("summary", ""),
@@ -62,19 +66,28 @@ class NewsDataService:
                     "url": item.get("url", ""),
                     "sentiment_score": item.get("overall_sentiment_score"),
                 }
-                for item in rows[:limit]
+                for item in rows
             ]
+            self._cache_set(cache_key, result)
+            return result[:limit]
         except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as exc:
             logger.warning("Alpha Vantage news fetch failed for %s: %s", symbol, exc)
             return []
 
     def fetch_rss_news(self, symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
+        cache_key = ("rss", symbol.upper())
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached[:limit]
         urls = [token.strip() for token in self.settings.news_rss_urls.split(",") if token.strip()]
         items: list[dict[str, Any]] = []
         for template in urls:
             url = template.format(symbol=symbol)
             try:
-                feed = feedparser.parse(url)
+                # feedparser itself does not honour timeouts — fetch the body with httpx first.
+                response = httpx.get(url, timeout=10.0, follow_redirects=True)
+                response.raise_for_status()
+                feed = feedparser.parse(response.content)
                 for entry in feed.entries[:limit]:
                     items.append({
                         "title": entry.get("title", ""),
@@ -84,13 +97,18 @@ class NewsDataService:
                         "url": entry.get("link", ""),
                         "sentiment_score": None,
                     })
-            except (ValueError, KeyError, AttributeError) as exc:
+            except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError, AttributeError) as exc:
                 logger.warning("RSS news fetch failed for %s: %s", symbol, exc)
+        self._cache_set(cache_key, items)
         return items[:limit]
 
     def fetch_reddit_posts(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         if not self.settings.reddit_client_id or not self.settings.reddit_client_secret:
             return []
+        cache_key = ("reddit", query.upper())
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached[:limit]
         try:
             import praw  # type: ignore
         except Exception:
@@ -102,6 +120,7 @@ class NewsDataService:
                 client_id=self.settings.reddit_client_id,
                 client_secret=self.settings.reddit_client_secret,
                 user_agent=self.settings.reddit_user_agent,
+                timeout=15,
             )
             posts = []
             for submission in reddit.subreddit("stocks+investing+wallstreetbets").search(
@@ -117,6 +136,7 @@ class NewsDataService:
                         "sentiment_score": None,
                     }
                 )
+            self._cache_set(cache_key, posts)
             return posts
         except (ValueError, KeyError, AttributeError, OSError) as exc:
             logger.warning("Reddit fetch failed for %s: %s", query, exc)

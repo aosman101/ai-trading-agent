@@ -556,6 +556,9 @@ class TradingOrchestrator:
         )
 
     def run_cycle_for_symbol(self, symbol: str) -> Dict[str, object]:
+        if self.settings.kill_switch:
+            logger.warning("Kill switch enabled — aborting cycle for %s before any work is done", symbol)
+            raise RuntimeError(f"Kill switch enabled; skipping {symbol}")
         with self._model_lock:
             models = self.models
         history = self.market_data.fetch_symbol_history(symbol)
@@ -761,6 +764,10 @@ class TradingOrchestrator:
         results = []
         last_error = None
         for symbol in symbols:
+            if self.settings.kill_switch:
+                logger.warning("Kill switch enabled — halting remaining cycle for %s", symbol)
+                last_error = "Kill switch enabled mid-cycle"
+                break
             try:
                 logger.info("Running cycle for %s", symbol)
                 result = self.run_cycle_for_symbol(symbol)
@@ -791,24 +798,79 @@ class TradingOrchestrator:
             )
         return results
 
+    def _evaluate_bundle(
+        self,
+        bundle: ModelBundle,
+        symbols: list[str],
+    ) -> dict[str, float]:
+        """Run the bundle's backtester across *symbols* and aggregate headline metrics."""
+        sharpes: list[float] = []
+        drawdowns: list[float] = []
+        returns: list[float] = []
+        for symbol in symbols:
+            try:
+                results = bundle.backtester.run_for_symbol(symbol)
+            except Exception as exc:
+                logger.warning("Retrain evaluation failed for %s: %s", symbol, exc)
+                continue
+            for strategy_result in results.values():
+                metrics = strategy_result.metrics or {}
+                sharpes.append(float(metrics.get("sharpe", 0.0) or 0.0))
+                drawdowns.append(float(metrics.get("max_drawdown", 0.0) or 0.0))
+                returns.append(float(metrics.get("total_return", 0.0) or 0.0))
+        if not sharpes:
+            return {"sharpe": 0.0, "max_drawdown": 1.0, "total_return": 0.0}
+        return {
+            "sharpe": float(sum(sharpes) / len(sharpes)),
+            "max_drawdown": float(max(drawdowns)) if drawdowns else 0.0,
+            "total_return": float(sum(returns) / len(returns)),
+        }
+
+    @staticmethod
+    def _bundle_score(metrics: dict[str, float]) -> float:
+        return metrics["sharpe"] - metrics["max_drawdown"] + 0.5 * metrics["total_return"]
+
     def retrain(self, symbols: Iterable[str] | None = None) -> None:
         logger.info("Starting scheduled retraining")
+        symbols_list = list(symbols or self.settings.symbols)
         self.repository.log_learning_event(
             {
                 "created_at": utc_now_iso(),
                 "event_type": "retrain_started",
                 "message": "Scheduled retraining started",
-                "payload": {"symbols": list(symbols or self.settings.symbols)},
+                "payload": {"symbols": symbols_list},
             }
         )
-        new_models = self.model_trainer.bootstrap_all(symbols=symbols)
         with self._model_lock:
-            self.models = new_models
-        self.repository.log_learning_event(
-            {
-                "created_at": utc_now_iso(),
-                "event_type": "retrain_completed",
-                "message": "Scheduled retraining completed",
-                "payload": {"symbols": list(symbols or self.settings.symbols)},
-            }
-        )
+            old_bundle = self.models
+        old_metrics = self._evaluate_bundle(old_bundle, symbols_list)
+        new_models = self.model_trainer.bootstrap_all(symbols=symbols)
+        new_metrics = self._evaluate_bundle(new_models, symbols_list)
+        promote = self._bundle_score(new_metrics) >= self._bundle_score(old_metrics)
+
+        event_payload = {
+            "symbols": symbols_list,
+            "old_metrics": old_metrics,
+            "new_metrics": new_metrics,
+            "promoted": promote,
+        }
+        if promote:
+            with self._model_lock:
+                self.models = new_models
+            self.repository.log_learning_event(
+                {
+                    "created_at": utc_now_iso(),
+                    "event_type": "retrain_completed",
+                    "message": "Scheduled retraining completed and new bundle promoted",
+                    "payload": event_payload,
+                }
+            )
+        else:
+            self.repository.log_learning_event(
+                {
+                    "created_at": utc_now_iso(),
+                    "event_type": "retrain_rejected",
+                    "message": "Scheduled retraining completed but new bundle did not beat the incumbent — keeping old models",
+                    "payload": event_payload,
+                }
+            )

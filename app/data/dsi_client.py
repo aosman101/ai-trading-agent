@@ -53,17 +53,45 @@ class DSIClient:
         return symbol.upper()
 
     @staticmethod
-    def _to_model_signal(response: Dict, model_key: str, symbol: str) -> ModelSignal:
+    def _derive_score(
+        change_pct: float,
+        current_price: float,
+        predicted_close: float,
+    ) -> float:
+        """Return a fractional expected-return score for DSI predictions.
+
+        DSI has historically been inconsistent about whether ``predicted_change_pct`` is
+        a fraction (0.015) or a percentage (1.5). Cross-check against the price delta
+        when possible, and clip to a safe range so one bad payload cannot nuke the
+        ensemble.
+        """
+        computed = None
+        if current_price and predicted_close:
+            try:
+                computed = (float(predicted_close) / float(current_price)) - 1.0
+            except (TypeError, ZeroDivisionError):
+                computed = None
+        candidate = float(change_pct or 0.0)
+        if abs(candidate) > 1.0:
+            candidate = candidate / 100.0
+        if computed is not None and abs(candidate) > 0 and abs(candidate) / max(abs(computed), 1e-9) > 10.0:
+            # Large disagreement implies the payload unit is off — trust the price-derived value.
+            candidate = computed
+        score = candidate if candidate != 0.0 else (computed or 0.0)
+        return max(-0.5, min(0.5, float(score)))
+
+    @classmethod
+    def _to_model_signal(cls, response: Dict, model_key: str, symbol: str) -> ModelSignal:
         prediction = response.get("prediction") or {}
-        current_price = response.get("current_price") or prediction.get("current_price") or 0.0
-        predicted_close = prediction.get("predicted_close") or response.get("predicted_close") or 0.0
-        change_pct = prediction.get("predicted_change_pct") or response.get("predicted_change_pct") or 0.0
-        confidence = prediction.get("confidence") or response.get("confidence") or 0.0
-        signal_strength = prediction.get("signal_strength") or response.get("signal_strength") or 0.0
+        current_price = float(response.get("current_price") or prediction.get("current_price") or 0.0)
+        predicted_close = float(prediction.get("predicted_close") or response.get("predicted_close") or 0.0)
+        change_pct = float(prediction.get("predicted_change_pct") or response.get("predicted_change_pct") or 0.0)
+        confidence = float(prediction.get("confidence") or response.get("confidence") or 0.0)
+        signal_strength = float(prediction.get("signal_strength") or response.get("signal_strength") or 0.0)
         raw_signal = prediction.get("signal") or response.get("signal") or "HOLD"
         direction = _DSI_SIGNAL_MAP.get(raw_signal.upper(), "flat")
 
-        score = change_pct / 100.0 if abs(change_pct) > 1.0 else change_pct
+        score = cls._derive_score(change_pct, current_price, predicted_close)
 
         stop_loss = prediction.get("stop_loss") or response.get("stop_loss")
         take_profit = prediction.get("take_profit") or response.get("take_profit")
