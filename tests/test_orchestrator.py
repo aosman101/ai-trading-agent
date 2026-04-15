@@ -250,6 +250,7 @@ class FakeDSIClient:
 def _build_orchestrator() -> TradingOrchestrator:
     orchestrator = TradingOrchestrator.__new__(TradingOrchestrator)
     orchestrator.settings = get_settings()
+    orchestrator.settings.allow_model_autopromotion = False
     orchestrator.market_data = FakeMarketData()
     orchestrator.news_data = FakeNewsData()
     orchestrator.repository = FakeRepository()
@@ -268,6 +269,42 @@ def _build_orchestrator() -> TradingOrchestrator:
         backtester=FakeBacktester(),
     )
     return orchestrator
+
+
+class FakeModelTrainer:
+    def __init__(self, candidate_bundle):
+        self.candidate_bundle = candidate_bundle
+        self.bootstrap_calls = []
+        self.saved_bundles = []
+
+    def _build_rl_frame(self, frame: pd.DataFrame):
+        feature_columns = [
+            column
+            for column in frame.columns
+            if column not in {
+                "symbol",
+                "open",
+                "high",
+                "low",
+                "close",
+                "adj_close",
+                "volume",
+                "forward_return_1",
+                "forward_return_5",
+                "forward_return_10",
+                "target_up_1",
+                "target_up_5",
+                "target_up_10",
+            }
+        ]
+        return frame.dropna().copy(), feature_columns
+
+    def bootstrap_all(self, symbols=None, *, persist=True):
+        self.bootstrap_calls.append({"symbols": list(symbols or []), "persist": persist})
+        return self.candidate_bundle
+
+    def save(self, bundle):
+        self.saved_bundles.append(bundle)
 
 
 def test_run_cycle_for_symbol_uses_live_state_and_updates_runtime_state():
@@ -459,6 +496,24 @@ def test_multiple_external_signals_all_consumed():
     assert "12" not in orchestrator.repository._consumed_signal_ids
 
 
+def test_external_signal_not_consumed_when_cycle_fails():
+    orchestrator = _build_orchestrator()
+    orchestrator.repository._external_signals = [
+        {"id": 77, "symbol": "AAPL", "direction": "long", "score": 0.6, "confidence": 0.8, "source": "site_a", "reasoning": ""},
+    ]
+
+    class FailingBroker(FakeBroker):
+        def place_bracket_order(self, trade_plan):
+            raise RuntimeError("broker unavailable")
+
+    orchestrator.broker = FailingBroker()
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        orchestrator.run_cycle_for_symbol("AAPL")
+
+    assert "77" not in orchestrator.repository._consumed_signal_ids
+
+
 def test_invalid_external_direction_normalized_to_flat():
     orchestrator = _build_orchestrator()
     orchestrator.repository._external_signals = [
@@ -469,6 +524,84 @@ def test_invalid_external_direction_normalized_to_flat():
     logged = orchestrator.repository.predictions_logged[0]
     ext_signals = [s for s in logged["payload"]["model_signals"] if s["name"].startswith("external:")]
     assert ext_signals[0]["direction"] == "flat"
+
+
+def test_refresh_model_performance_tracks_rl_subsignals():
+    orchestrator = _build_orchestrator()
+    orchestrator.repository.recent_predictions = lambda limit=100: [
+        {
+            "created_at": "2024-01-04T16:00:00+00:00",
+            "symbol": "AAPL",
+            "payload": {
+                "model_signals": [
+                    {
+                        "name": "rl",
+                        "direction": "long",
+                        "confidence": 0.65,
+                        "metadata": {
+                            "ppo_signal": {"name": "ppo", "direction": "long", "confidence": 0.7},
+                            "dqn_signal": {"name": "dqn", "direction": "short", "confidence": 0.6},
+                        },
+                    }
+                ]
+            },
+        }
+    ]
+
+    orchestrator._refresh_model_performance("AAPL", _history_frame().reset_index(names="ds"))
+
+    global_metrics = orchestrator.repository.runtime_state["model_performance"]["global"]
+    assert "ppo" in global_metrics
+    assert "dqn" in global_metrics
+
+
+def test_retrain_keeps_incumbent_when_autopromotion_disabled():
+    orchestrator = _build_orchestrator()
+    old_bundle = orchestrator.models
+    candidate_bundle = SimpleNamespace(
+        finbert=FakePredictor("finbert", "long", 0.2, 0.6),
+        ppo=FakeRLAgent("ppo", "long"),
+        dqn=FakeRLAgent("dqn", "long"),
+        itransformer=None,
+        backtester=FakeBacktester(),
+    )
+    trainer = FakeModelTrainer(candidate_bundle)
+    orchestrator.model_trainer = trainer
+    orchestrator.settings.allow_model_autopromotion = False
+
+    orchestrator.retrain(["AAPL"])
+
+    assert trainer.bootstrap_calls == [{"symbols": ["AAPL"], "persist": False}]
+    assert trainer.saved_bundles == []
+    assert orchestrator.models is old_bundle
+    assert orchestrator.repository.learning_events[-1]["event_type"] == "retrain_candidate_ready"
+
+
+def test_retrain_promotes_only_after_bundle_beats_incumbent():
+    orchestrator = _build_orchestrator()
+    candidate_bundle = SimpleNamespace(
+        finbert=FakePredictor("finbert", "long", 0.2, 0.6),
+        ppo=FakeRLAgent("ppo", "long"),
+        dqn=FakeRLAgent("dqn", "long"),
+        itransformer=None,
+        backtester=FakeBacktester(),
+    )
+    orchestrator.models = SimpleNamespace(
+        finbert=FakePredictor("finbert", "long", 0.2, 0.6),
+        ppo=FakeRLAgent("ppo", "short"),
+        dqn=FakeRLAgent("dqn", "short"),
+        itransformer=None,
+        backtester=FakeBacktester(),
+    )
+    trainer = FakeModelTrainer(candidate_bundle)
+    orchestrator.model_trainer = trainer
+    orchestrator.settings.allow_model_autopromotion = True
+
+    orchestrator.retrain(["AAPL"])
+
+    assert trainer.saved_bundles == [candidate_bundle]
+    assert orchestrator.models is candidate_bundle
+    assert orchestrator.repository.learning_events[-1]["event_type"] == "retrain_completed"
 
 
 # ---------------------------------------------------------------------------

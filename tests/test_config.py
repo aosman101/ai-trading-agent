@@ -20,6 +20,7 @@ def test_runtime_validation_requires_matching_paper_mode():
 
 def test_runtime_validation_requires_complete_dsi_configuration():
     settings = Settings(
+        environment="prod",
         dsi_base_url="https://dsi.example.com",
         dsi_email="",
         dsi_password="",
@@ -27,6 +28,18 @@ def test_runtime_validation_requires_complete_dsi_configuration():
 
     with pytest.raises(ValueError, match="DSI configuration must include"):
         settings.validate_runtime_configuration()
+
+
+def test_runtime_validation_allows_partial_dsi_configuration_in_dev():
+    settings = Settings(
+        environment="dev",
+        dsi_base_url="https://dsi.example.com",
+        dsi_email="",
+        dsi_password="",
+    )
+
+    settings.validate_runtime_configuration()
+    assert settings.dsi_configured is False
 
 
 def test_api_runtime_validation_requires_token_in_non_dev():

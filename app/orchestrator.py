@@ -211,7 +211,14 @@ class TradingOrchestrator:
             market_regime = payload.get("market_regime")
             scopes = self.decision_engine.prediction_scopes(prediction_symbol, regime=market_regime)
             signals = payload.get("model_signals") or []
+            expanded_signals = list(signals)
             for signal in signals:
+                metadata = signal.get("metadata") or {}
+                for key in ("ppo_signal", "dqn_signal"):
+                    sub_signal = metadata.get(key)
+                    if isinstance(sub_signal, dict) and sub_signal.get("name"):
+                        expanded_signals.append(sub_signal)
+            for signal in expanded_signals:
                 model_name = str(signal.get("name", "")).strip()
                 if not model_name:
                     continue
@@ -351,14 +358,16 @@ class TradingOrchestrator:
                 "dqn_action": dqn_signal.metadata.get("action"),
                 "ppo_weight": ppo_weight,
                 "dqn_weight": dqn_weight,
+                "ppo_signal": ppo_signal.model_dump(mode="json"),
+                "dqn_signal": dqn_signal.model_dump(mode="json"),
             },
         )
 
-    def _consume_external_signals(self, symbol: str) -> list[ModelSignal]:
-        """Pull pending external signals for *symbol*, convert to ModelSignals, mark consumed."""
+    def _load_external_signals(self, symbol: str) -> tuple[list[ModelSignal], list[int | str]]:
+        """Pull pending external signals for *symbol* without consuming them yet."""
         pending = self.repository.pending_external_signals(symbol)
         if not pending:
-            return []
+            return [], []
         signals: list[ModelSignal] = []
         ids_to_consume: list[int | str] = []
         for row in pending:
@@ -385,10 +394,16 @@ class TradingOrchestrator:
             signal_id = row.get("id") or row.get("_local_id")
             if signal_id is not None:
                 ids_to_consume.append(signal_id)
-        if ids_to_consume:
-            self.repository.mark_signals_consumed(ids_to_consume)
-        logger.info("Consumed %d external signal(s) for %s", len(signals), symbol)
-        return signals
+        logger.info("Loaded %d pending external signal(s) for %s", len(signals), symbol)
+        return signals, ids_to_consume
+
+    def _mark_external_signals_consumed(self, signal_ids: list[int | str]) -> None:
+        if not signal_ids:
+            return
+        try:
+            self.repository.mark_signals_consumed(signal_ids)
+        except Exception as exc:
+            logger.warning("Failed to mark external signals as consumed: %s", exc)
 
     def _write_journal_entry(
         self,
@@ -641,7 +656,7 @@ class TradingOrchestrator:
         if itransformer_signal is not None:
             model_signals.append(itransformer_signal)
 
-        external_signals = self._consume_external_signals(symbol)
+        external_signals, external_signal_ids = self._load_external_signals(symbol)
         model_signals.extend(external_signals)
 
         decision = self.decision_engine.combine(
@@ -735,6 +750,7 @@ class TradingOrchestrator:
             daily_pnl=daily_pnl,
             order_response=order_response,
         )
+        self._mark_external_signals_consumed(external_signal_ids)
 
         status_snapshot = {
             "last_cycle_at": utc_now_iso(),
@@ -798,37 +814,112 @@ class TradingOrchestrator:
             )
         return results
 
+    def _evaluate_rl_component(
+        self,
+        bundle: ModelBundle,
+        model_name: str,
+        symbol: str,
+        history: pd.DataFrame,
+    ) -> dict[str, float] | None:
+        if history.empty:
+            return None
+        rl_frame, feature_columns = self.model_trainer._build_rl_frame(history.copy())
+        if len(rl_frame) < 2:
+            return None
+
+        agent = getattr(bundle, model_name, None)
+        if agent is None:
+            return None
+
+        returns: list[float] = []
+        accuracy: list[float] = []
+        for idx in range(len(rl_frame) - 1):
+            row = rl_frame.iloc[idx]
+            observation = row[feature_columns].astype(float).to_numpy(dtype=np.float32)
+            observation = np.concatenate(
+                [
+                    observation,
+                    np.array([0.0, 1.0, 0.0], dtype=np.float32),
+                ]
+            ).astype(np.float32)
+            signal = agent.predict(observation, symbol=symbol)
+            realized_return = float(rl_frame.iloc[idx + 1].get("forward_return_1", 0.0) or 0.0)
+            direction_multiplier = self._signal_direction_multiplier(signal.direction)
+            signal_return = direction_multiplier * realized_return
+            if direction_multiplier == 0.0:
+                sample_accuracy = 1.0 if abs(realized_return) < 0.002 else 0.0
+                signal_return = -abs(realized_return) * 0.1
+            else:
+                sample_accuracy = 1.0 if signal_return > 0 else 0.0
+            returns.append(signal_return)
+            accuracy.append(sample_accuracy)
+
+        if not returns:
+            return None
+
+        returns_series = pd.Series(returns, dtype=float)
+        equity_curve = (1.0 + returns_series).cumprod()
+        return {
+            "accuracy": float(np.mean(accuracy)) if accuracy else 0.0,
+            "sharpe": sharpe_ratio(returns_series, periods_per_year=252),
+            "max_drawdown": max_drawdown(equity_curve) if not equity_curve.empty else 1.0,
+            "total_return": float(equity_curve.iloc[-1] - 1.0) if not equity_curve.empty else 0.0,
+            "samples": float(len(returns)),
+        }
+
     def _evaluate_bundle(
         self,
         bundle: ModelBundle,
         symbols: list[str],
     ) -> dict[str, float]:
-        """Run the bundle's backtester across *symbols* and aggregate headline metrics."""
+        """Evaluate bundle-specific model quality on recent history."""
         sharpes: list[float] = []
         drawdowns: list[float] = []
         returns: list[float] = []
+        accuracies: list[float] = []
+        samples = 0.0
         for symbol in symbols:
             try:
-                results = bundle.backtester.run_for_symbol(symbol)
+                history = self.market_data.fetch_symbol_history(symbol)
             except Exception as exc:
                 logger.warning("Retrain evaluation failed for %s: %s", symbol, exc)
                 continue
-            for strategy_result in results.values():
-                metrics = strategy_result.metrics or {}
+            for model_name in ("ppo", "dqn"):
+                metrics = self._evaluate_rl_component(bundle, model_name, symbol, history)
+                if not metrics:
+                    continue
                 sharpes.append(float(metrics.get("sharpe", 0.0) or 0.0))
                 drawdowns.append(float(metrics.get("max_drawdown", 0.0) or 0.0))
                 returns.append(float(metrics.get("total_return", 0.0) or 0.0))
+                accuracies.append(float(metrics.get("accuracy", 0.0) or 0.0))
+                samples += float(metrics.get("samples", 0.0) or 0.0)
         if not sharpes:
-            return {"sharpe": 0.0, "max_drawdown": 1.0, "total_return": 0.0}
+            return {"sharpe": 0.0, "max_drawdown": 1.0, "total_return": 0.0, "accuracy": 0.0, "samples": 0.0}
         return {
             "sharpe": float(sum(sharpes) / len(sharpes)),
             "max_drawdown": float(max(drawdowns)) if drawdowns else 0.0,
             "total_return": float(sum(returns) / len(returns)),
+            "accuracy": float(sum(accuracies) / len(accuracies)) if accuracies else 0.0,
+            "samples": samples,
         }
 
     @staticmethod
     def _bundle_score(metrics: dict[str, float]) -> float:
-        return metrics["sharpe"] - metrics["max_drawdown"] + 0.5 * metrics["total_return"]
+        return (
+            metrics["sharpe"]
+            - metrics["max_drawdown"]
+            + 0.5 * metrics["total_return"]
+            + 0.25 * metrics.get("accuracy", 0.0)
+        )
+
+    def _bundle_meets_promotion_thresholds(self, metrics: dict[str, float]) -> bool:
+        return (
+            metrics.get("samples", 0.0) > 0
+            and metrics.get("sharpe", 0.0) >= self.settings.min_sharpe_to_deploy
+            and metrics.get("max_drawdown", 1.0) <= self.settings.max_drawdown_to_deploy
+            and metrics.get("accuracy", 0.0) >= self.settings.min_win_rate_to_deploy
+            and metrics.get("total_return", 0.0) >= self.settings.min_total_return_to_deploy
+        )
 
     def retrain(self, symbols: Iterable[str] | None = None) -> None:
         logger.info("Starting scheduled retraining")
@@ -844,17 +935,24 @@ class TradingOrchestrator:
         with self._model_lock:
             old_bundle = self.models
         old_metrics = self._evaluate_bundle(old_bundle, symbols_list)
-        new_models = self.model_trainer.bootstrap_all(symbols=symbols)
+        new_models = self.model_trainer.bootstrap_all(symbols=symbols, persist=False)
         new_metrics = self._evaluate_bundle(new_models, symbols_list)
-        promote = self._bundle_score(new_metrics) >= self._bundle_score(old_metrics)
+        autopromotion_enabled = bool(self.settings.allow_model_autopromotion)
+        meets_thresholds = self._bundle_meets_promotion_thresholds(new_metrics)
+        beats_incumbent = self._bundle_score(new_metrics) > self._bundle_score(old_metrics)
+        promote = autopromotion_enabled and meets_thresholds and beats_incumbent
 
         event_payload = {
             "symbols": symbols_list,
             "old_metrics": old_metrics,
             "new_metrics": new_metrics,
+            "autopromotion_enabled": autopromotion_enabled,
+            "meets_thresholds": meets_thresholds,
+            "beats_incumbent": beats_incumbent,
             "promoted": promote,
         }
         if promote:
+            self.model_trainer.save(new_models)
             with self._model_lock:
                 self.models = new_models
             self.repository.log_learning_event(
@@ -866,11 +964,16 @@ class TradingOrchestrator:
                 }
             )
         else:
+            event_type = "retrain_candidate_ready"
+            message = "Scheduled retraining completed; candidate retained for review and incumbent remains active"
+            if autopromotion_enabled:
+                event_type = "retrain_rejected"
+                message = "Scheduled retraining completed but candidate did not satisfy promotion gates"
             self.repository.log_learning_event(
                 {
                     "created_at": utc_now_iso(),
-                    "event_type": "retrain_rejected",
-                    "message": "Scheduled retraining completed but new bundle did not beat the incumbent — keeping old models",
+                    "event_type": event_type,
+                    "message": message,
                     "payload": event_payload,
                 }
             )
