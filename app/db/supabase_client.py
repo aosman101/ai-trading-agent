@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -9,6 +10,21 @@ from app.utils.logging import get_logger
 from app.utils.time import utc_now_iso
 
 logger = get_logger(__name__)
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class TradeRepository:
@@ -238,6 +254,44 @@ class TradeRepository:
 
     def list_external_signals(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self.read("external_signals", limit=limit)
+
+    def recent_external_signals(self, limit: int = 500, source: str | None = None) -> List[Dict[str, Any]]:
+        if self.client is not None:
+            try:
+                query = self.client.table("external_signals").select("*").order("created_at", desc=True).limit(limit)
+                if source:
+                    query = query.eq("source", source)
+                response = query.execute()
+                return response.data or []
+            except Exception as exc:
+                logger.warning("Supabase recent_external_signals failed: %s", exc)
+        rows = self._read_local("external_signals")
+        if source:
+            rows = [row for row in rows if row.get("source") == source]
+        return list(reversed(rows[-limit:]))
+
+    def count_recent_external_signals(self, source: str, caller_id: str, window_seconds: int) -> int:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        total = 0
+        for row in self.recent_external_signals(limit=1000, source=source):
+            created_at = _parse_timestamp(row.get("created_at"))
+            if created_at is None or created_at < cutoff:
+                continue
+            payload = row.get("payload") or {}
+            if str(payload.get("caller_id", "")) == caller_id:
+                total += 1
+        return total
+
+    def has_recent_external_signal_idempotency(self, source: str, key: str, ttl_seconds: int) -> bool:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+        for row in self.recent_external_signals(limit=2000, source=source):
+            created_at = _parse_timestamp(row.get("created_at"))
+            if created_at is None or created_at < cutoff:
+                continue
+            payload = row.get("payload") or {}
+            if str(payload.get("idempotency_key", "")) == key:
+                return True
+        return False
 
     # --- Journal ---
 
