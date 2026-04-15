@@ -113,10 +113,15 @@ class EnsembleDecisionEngine:
     @staticmethod
     def _signal_score(signal: ModelSignal | StrategySignal) -> float:
         direction_multiplier = {"long": 1.0, "short": -1.0, "flat": 0.0}.get(signal.direction, 0.0)
-        base = direction_multiplier * max(abs(getattr(signal, "score", 0.0)), getattr(signal, "confidence", 0.0))
+        if direction_multiplier == 0.0:
+            return 0.0
         if isinstance(signal, StrategySignal):
-            base = direction_multiplier * signal.confidence
-        return float(base)
+            return float(direction_multiplier * clamp(signal.confidence, 0.0, 1.0))
+        raw_score = abs(float(getattr(signal, "score", 0.0) or 0.0))
+        confidence = clamp(float(getattr(signal, "confidence", 0.0) or 0.0), 0.0, 1.0)
+        # Treat score as a magnitude (edge) and confidence as a reliability weight.
+        magnitude = clamp(raw_score if raw_score > 0 else confidence, 0.0, 1.0)
+        return float(direction_multiplier * magnitude * confidence)
 
     def combine(
         self,
@@ -140,13 +145,22 @@ class EnsembleDecisionEngine:
 
         weighted_score = float(sum(contributions.values()))
 
-        # Agreement / disagreement analysis across model signals.
-        directions = [s.direction for s in model_signals if s.direction != "flat"]
-        n_long = sum(1 for d in directions if d == "long")
-        n_short = sum(1 for d in directions if d == "short")
-        n_active = n_long + n_short
-        if n_active > 0:
-            agreement_ratio = max(n_long, n_short) / n_active
+        # Weighted agreement: each model's vote counts proportional to its ensemble weight.
+        long_weight = 0.0
+        short_weight = 0.0
+        active_weight = 0.0
+        for signal in model_signals:
+            if signal.direction == "flat":
+                continue
+            weight = weights.get(signal.name, 0.0)
+            active_weight += weight
+            if signal.direction == "long":
+                long_weight += weight
+            elif signal.direction == "short":
+                short_weight += weight
+        n_active = sum(1 for s in model_signals if s.direction != "flat")
+        if active_weight > 0:
+            agreement_ratio = max(long_weight, short_weight) / active_weight
         else:
             agreement_ratio = 0.0
 
