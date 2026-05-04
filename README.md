@@ -16,7 +16,7 @@ Market + News ─▶ Features ─▶ ┌ DSI (NHITS/TFT/LightGBM) ┐
                              ├ FinBERT sentiment        ├─▶ Ensemble ─▶ Adversarial Review
                              ├ PPO / DQN (RL)           │
                              └ External signals         ┘
-                                                              └─▶ Risk ─▶ Alpaca ─▶ Supabase/JSONL
+                                                   └─▶ Risk ─▶ Alpaca ─▶ Supabase/JSONL
 ```
 
 ## Models
