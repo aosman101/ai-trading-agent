@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     min_confidence_to_trade: float = 0.55
     min_active_model_signals: int = 2
     min_directional_agreement: float = 0.60
+    decision_memory_enabled: bool = True
+    decision_memory_holding_bars: int = 5
+    decision_memory_min_samples: int = 3
+    decision_memory_alpha_threshold: float = 0.005
+    decision_memory_context_limit: int = 8
     max_risk_per_trade: float = 0.01
     max_daily_loss_pct: float = 0.03
     max_portfolio_heat: float = 0.10

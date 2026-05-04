@@ -34,6 +34,7 @@ class TradeRepository:
         "equity_curve",
         "learning_events",
         "model_weights",
+        "decision_memory",
         "runtime_state",
         "external_signals",
         "journal",
@@ -152,6 +153,108 @@ class TradeRepository:
 
     def save_model_weights(self, record: Dict[str, Any]) -> None:
         self.insert("model_weights", record)
+
+    # --- Decision memory ---
+
+    def decision_memory_exists(self, symbol: str, trade_date: str) -> bool:
+        if self.client is not None:
+            try:
+                response = (
+                    self.client.table("decision_memory")
+                    .select("id")
+                    .eq("symbol", symbol)
+                    .eq("trade_date", trade_date)
+                    .limit(1)
+                    .execute()
+                )
+                return bool(response.data)
+            except Exception as exc:
+                logger.warning("Supabase decision_memory_exists failed: %s", exc)
+        return any(
+            row.get("symbol") == symbol and str(row.get("trade_date")) == trade_date
+            for row in self._read_local("decision_memory")
+        )
+
+    def store_decision_memory(self, record: Dict[str, Any]) -> None:
+        symbol = str(record.get("symbol", ""))
+        trade_date = str(record.get("trade_date", ""))
+        if symbol and trade_date and self.decision_memory_exists(symbol, trade_date):
+            return
+        self.insert("decision_memory", record)
+
+    def pending_decision_memory(self, symbol: str | None = None, limit: int = 200) -> List[Dict[str, Any]]:
+        if self.client is not None:
+            try:
+                query = (
+                    self.client.table("decision_memory")
+                    .select("*")
+                    .eq("status", "pending")
+                    .order("trade_date", desc=False)
+                    .limit(limit)
+                )
+                if symbol:
+                    query = query.eq("symbol", symbol)
+                response = query.execute()
+                return response.data or []
+            except Exception as exc:
+                logger.warning("Supabase pending_decision_memory failed: %s", exc)
+        rows = [row for row in self._read_local("decision_memory") if row.get("status") == "pending"]
+        if symbol:
+            rows = [row for row in rows if row.get("symbol") == symbol]
+        rows.sort(key=lambda row: str(row.get("trade_date", "")))
+        return rows[:limit]
+
+    def recent_decision_memory(
+        self,
+        limit: int = 200,
+        symbol: str | None = None,
+        status: str | None = "resolved",
+    ) -> List[Dict[str, Any]]:
+        if self.client is not None:
+            try:
+                query = (
+                    self.client.table("decision_memory")
+                    .select("*")
+                    .order("trade_date", desc=True)
+                    .limit(limit)
+                )
+                if symbol:
+                    query = query.eq("symbol", symbol)
+                if status:
+                    query = query.eq("status", status)
+                response = query.execute()
+                return response.data or []
+            except Exception as exc:
+                logger.warning("Supabase recent_decision_memory failed: %s", exc)
+        rows = self._read_local("decision_memory")
+        if symbol:
+            rows = [row for row in rows if row.get("symbol") == symbol]
+        if status:
+            rows = [row for row in rows if row.get("status") == status]
+        rows.sort(key=lambda row: str(row.get("trade_date", "")), reverse=True)
+        return rows[:limit]
+
+    def update_decision_memory_outcome(self, entry: Dict[str, Any], updates: Dict[str, Any]) -> None:
+        row_id = entry.get("id") or entry.get("_local_id")
+        symbol = str(entry.get("symbol", ""))
+        trade_date = str(entry.get("trade_date", ""))
+        if self.client is not None and entry.get("id") is not None:
+            try:
+                self.client.table("decision_memory").update(updates).eq("id", entry["id"]).execute()
+                return
+            except Exception as exc:
+                logger.warning("Supabase update_decision_memory_outcome failed: %s", exc)
+        path = self._path("decision_memory")
+        if not path.exists():
+            return
+        rows = self._read_local("decision_memory")
+        with path.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                same_id = row_id is not None and str(row.get("id") or row.get("_local_id")) == str(row_id)
+                same_key = row.get("symbol") == symbol and str(row.get("trade_date")) == trade_date
+                if same_id or same_key:
+                    row.update(updates)
+                handle.write(json.dumps(row, default=str) + "\n")
 
     def recent_trades(self, limit: int = 50) -> List[Dict[str, Any]]:
         return self.read("trades", limit=limit)
