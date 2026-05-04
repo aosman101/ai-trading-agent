@@ -13,6 +13,7 @@ from app.data.dsi_client import DSIClient
 from app.data.market_data import MarketDataService
 from app.data.news_data import NewsDataService
 from app.db.supabase_client import TradeRepository
+from app.ensemble.decision_memory import DecisionMemory
 from app.ensemble.decision_engine import EnsembleDecisionEngine
 from app.execution.alpaca_broker import AlpacaBroker
 from app.risk.risk_manager import RiskManager
@@ -36,6 +37,7 @@ class TradingOrchestrator:
         self.market_data = MarketDataService()
         self.news_data = NewsDataService()
         self.repository = TradeRepository()
+        self.decision_memory = DecisionMemory(self.repository)
         self.decision_engine = EnsembleDecisionEngine()
         self.strategy_selector = StrategySelector()
         self.risk_manager = RiskManager()
@@ -153,6 +155,33 @@ class TradingOrchestrator:
         if total_weight == 0:
             return None
         return blended / total_weight
+
+    def _benchmark_frame_for_memory(self, symbol: str, history: pd.DataFrame) -> pd.DataFrame | None:
+        if not self.settings.decision_memory_enabled:
+            return None
+        benchmark_symbol = self.settings.benchmark_symbol.strip().upper()
+        if not benchmark_symbol:
+            return None
+        if benchmark_symbol == symbol.upper():
+            return history.reset_index(names="ds")
+        try:
+            return self.market_data.fetch_symbol_history(benchmark_symbol).reset_index(names="ds")
+        except Exception as exc:
+            logger.warning("Decision memory benchmark fetch failed for %s: %s", benchmark_symbol, exc)
+            return None
+
+    @staticmethod
+    def _latest_trade_date(history_frame: pd.DataFrame) -> str:
+        latest_ds = pd.to_datetime(history_frame.iloc[-1]["ds"], utc=True)
+        return str(latest_ds.date())
+
+    @staticmethod
+    def _benchmark_entry_for_memory(benchmark_frame: pd.DataFrame | None, trade_date: str) -> float | None:
+        prepared = DecisionMemory._prepare_frame(benchmark_frame)
+        idx = DecisionMemory._anchor_index(prepared, trade_date)
+        if idx is None:
+            return None
+        return float(prepared.iloc[idx]["close"])
 
     @staticmethod
     def _signal_direction_multiplier(direction: str) -> float:
@@ -416,6 +445,8 @@ class TradingOrchestrator:
         equity: float,
         daily_pnl: float,
         order_response: dict | None,
+        decision_memory_summary: str = "",
+        decision_memory_assessment: dict[str, Any] | None = None,
     ) -> None:
         """Write a detailed, human-readable journal entry for the website."""
         traded = order_response is not None
@@ -462,6 +493,16 @@ class TradingOrchestrator:
                 lines.append(f"  - {flag}")
         lines.append("")
 
+        memory_notes = (decision_memory_assessment or {}).get("notes") or []
+        if decision_memory_summary or memory_notes:
+            lines.append("Decision memory:")
+            for note in memory_notes:
+                lines.append(f"  - {note}")
+            if decision_memory_summary:
+                for line in decision_memory_summary.splitlines():
+                    lines.append(f"  {line}" if line else "")
+            lines.append("")
+
         if traded:
             lines.append(f"Order placed: {risk_plan.direction} {risk_plan.quantity} shares")
             lines.append(f"  Entry: ${risk_plan.entry_price:.2f} | Stop: ${risk_plan.stop_loss:.2f} | Target: ${risk_plan.take_profit:.2f}")
@@ -498,6 +539,7 @@ class TradingOrchestrator:
                     "market_regime": market_regime,
                     "risk_flags": decision.risk_flags,
                     "adversarial_review": decision.debate,
+                    "decision_memory": decision_memory_assessment or {},
                     "risk_plan_approved": risk_plan.approved,
                     "quantity": risk_plan.quantity,
                     "entry_price": risk_plan.entry_price,
@@ -552,6 +594,9 @@ class TradingOrchestrator:
         decision,
         model_signals: list[ModelSignal],
         selected_strategy: StrategySignal | None,
+        decision_memory_context: dict[str, Any] | None = None,
+        decision_memory_assessment: dict[str, Any] | None = None,
+        decision_memory_resolved: list[dict[str, Any]] | None = None,
     ) -> None:
         self.repository.log_prediction(
             {
@@ -570,6 +615,9 @@ class TradingOrchestrator:
                     "market_regime": decision.market_regime,
                     "risk_flags": decision.risk_flags,
                     "adversarial_review": decision.debate,
+                    "decision_memory_context": decision_memory_context or {},
+                    "decision_memory_assessment": decision_memory_assessment or {},
+                    "decision_memory_resolved_count": len(decision_memory_resolved or []),
                     "contributions": decision.contributions,
                     "model_signals": [signal.model_dump() for signal in model_signals],
                     "selected_strategy": selected_strategy.model_dump() if selected_strategy else None,
@@ -593,6 +641,29 @@ class TradingOrchestrator:
         if history.empty:
             raise ValueError(f"No market data returned for {symbol} — cannot run cycle")
         history_frame = history.reset_index(names="ds")
+        benchmark_frame = self._benchmark_frame_for_memory(symbol, history)
+        decision_memory_resolved: list[dict[str, Any]] = []
+        decision_memory_context: dict[str, Any] = {"same_symbol": [], "cross_symbol": []}
+        decision_memory_summary = ""
+        if self.settings.decision_memory_enabled:
+            try:
+                decision_memory_resolved = self.decision_memory.resolve_pending(symbol, history_frame, benchmark_frame)
+                decision_memory_context = self.decision_memory.recent_context(symbol)
+                decision_memory_summary = self.decision_memory.context_summary(decision_memory_context)
+                if decision_memory_resolved:
+                    self.repository.log_learning_event(
+                        {
+                            "created_at": utc_now_iso(),
+                            "event_type": "decision_memory_resolved",
+                            "message": f"Resolved {len(decision_memory_resolved)} decision memory entr{'y' if len(decision_memory_resolved) == 1 else 'ies'} for {symbol}",
+                            "payload": {
+                                "symbol": symbol,
+                                "resolved": decision_memory_resolved,
+                            },
+                        }
+                    )
+            except Exception as exc:
+                logger.warning("Decision memory resolution failed for %s: %s", symbol, exc)
         latest_row = history.iloc[-1]
         latest_price = float(latest_row["close"])
         market_regime = self._market_regime(history)
@@ -678,6 +749,13 @@ class TradingOrchestrator:
             selected_strategy=selected_strategy,
             regime=market_regime,
         )
+        decision_memory_assessment = {"samples": 0, "confidence_multiplier": 1.0, "notes": []}
+        if self.settings.decision_memory_enabled:
+            try:
+                decision_memory_assessment = self.decision_memory.assess_decision(decision)
+                decision = self.decision_memory.apply_assessment(decision, decision_memory_assessment)
+            except Exception as exc:
+                logger.warning("Decision memory assessment failed for %s: %s", symbol, exc)
 
         risk_plan = self.risk_manager.build_trade_plan(
             symbol=symbol,
@@ -696,7 +774,15 @@ class TradingOrchestrator:
             peak_equity=live_state.get("max_equity"),
         )
 
-        self._log_prediction(symbol, decision, model_signals, selected_strategy)
+        self._log_prediction(
+            symbol,
+            decision,
+            model_signals,
+            selected_strategy,
+            decision_memory_context=decision_memory_context,
+            decision_memory_assessment=decision_memory_assessment,
+            decision_memory_resolved=decision_memory_resolved,
+        )
         self.repository.log_equity(
             {
                 "created_at": utc_now_iso(),
@@ -762,7 +848,25 @@ class TradingOrchestrator:
             equity=equity,
             daily_pnl=daily_pnl,
             order_response=order_response,
+            decision_memory_summary=decision_memory_summary,
+            decision_memory_assessment=decision_memory_assessment,
         )
+        if self.settings.decision_memory_enabled:
+            try:
+                trade_date = self._latest_trade_date(history_frame)
+                self.decision_memory.store_pending(
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    decision=decision,
+                    risk_plan=risk_plan,
+                    model_signals=model_signals,
+                    selected_strategy=selected_strategy,
+                    entry_price=latest_price,
+                    benchmark_symbol=self.settings.benchmark_symbol,
+                    benchmark_entry_price=self._benchmark_entry_for_memory(benchmark_frame, trade_date),
+                )
+            except Exception as exc:
+                logger.warning("Decision memory store failed for %s: %s", symbol, exc)
         self._mark_external_signals_consumed(external_signal_ids)
 
         status_snapshot = {
@@ -775,6 +879,8 @@ class TradingOrchestrator:
             "most_influential_model": decision.most_influential_model,
             "portfolio_rating": decision.rating,
             "risk_flags": decision.risk_flags,
+            "decision_memory": decision_memory_assessment,
+            "decision_memory_resolved_count": len(decision_memory_resolved),
             "market_regime": decision.market_regime,
             "weight_scope": decision.weight_scope,
             "dsi_status": dsi_status,

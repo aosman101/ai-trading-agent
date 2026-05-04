@@ -16,6 +16,7 @@ for module_name in ("feedparser", "gymnasium", "httpx", "yfinance"):
         sys.modules[module_name] = MagicMock()
 
 from app.config import get_settings
+from app.ensemble.decision_memory import DecisionMemory
 from app.orchestrator import TradingOrchestrator
 from app.types import ModelSignal, StrategySignal
 
@@ -78,6 +79,7 @@ class FakeRepository:
         self.learning_events = []
         self.weights_saved = []
         self.journal_entries = []
+        self.decision_memory_rows = []
         self._external_signals: list[dict] = []
         self._consumed_signal_ids: set = set()
 
@@ -103,6 +105,33 @@ class FakeRepository:
 
     def save_model_weights(self, record):
         self.weights_saved.append(record)
+
+    def decision_memory_exists(self, symbol: str, trade_date: str):
+        return any(row.get("symbol") == symbol and row.get("trade_date") == trade_date for row in self.decision_memory_rows)
+
+    def store_decision_memory(self, record):
+        if not self.decision_memory_exists(record["symbol"], record["trade_date"]):
+            self.decision_memory_rows.append({**record, "_local_id": len(self.decision_memory_rows) + 1})
+
+    def pending_decision_memory(self, symbol: str | None = None, limit: int = 200):
+        rows = [row for row in self.decision_memory_rows if row.get("status") == "pending"]
+        if symbol:
+            rows = [row for row in rows if row.get("symbol") == symbol]
+        return rows[:limit]
+
+    def recent_decision_memory(self, limit: int = 200, symbol: str | None = None, status: str | None = "resolved"):
+        rows = list(self.decision_memory_rows)
+        if symbol:
+            rows = [row for row in rows if row.get("symbol") == symbol]
+        if status:
+            rows = [row for row in rows if row.get("status") == status]
+        return list(reversed(rows[-limit:]))
+
+    def update_decision_memory_outcome(self, entry, updates):
+        for row in self.decision_memory_rows:
+            if row.get("_local_id") == entry.get("_local_id"):
+                row.update(updates)
+                return
 
     def log_equity(self, record):
         self.equity_logged.append(record)
@@ -254,6 +283,7 @@ def _build_orchestrator() -> TradingOrchestrator:
     orchestrator.market_data = FakeMarketData()
     orchestrator.news_data = FakeNewsData()
     orchestrator.repository = FakeRepository()
+    orchestrator.decision_memory = DecisionMemory(orchestrator.repository)
     orchestrator.decision_engine = __import__("app.ensemble.decision_engine", fromlist=["EnsembleDecisionEngine"]).EnsembleDecisionEngine()
     orchestrator.strategy_selector = __import__("app.strategies.selector", fromlist=["StrategySelector"]).StrategySelector()
     orchestrator.risk_manager = __import__("app.risk.risk_manager", fromlist=["RiskManager"]).RiskManager()

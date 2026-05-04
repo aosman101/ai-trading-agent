@@ -17,6 +17,8 @@ Market + News ─▶ Features ─▶ ┌ DSI (NHITS/TFT/LightGBM) ┐
                              ├ PPO / DQN (RL)           │
                              └ External signals         ┘
                                                    └─▶ Risk ─▶ Alpaca ─▶ Supabase/JSONL
+                                                        ▲
+                                                        └─ Decision Memory
 ```
 
 ## Models
@@ -40,6 +42,8 @@ Five rule-based strategies compete via live backtest performance: **Momentum**, 
 - Deterministic bull/bear/risk review inspired by multi-agent trading desks:
   trades need enough active model agreement before sizing.
 - Five-tier portfolio ratings: buy, overweight, hold, underweight, sell.
+- Decision memory resolves prior calls against later benchmark-relative returns
+  and reflects lessons back into future confidence/risk review.
 - ATR-based stops combined with DSI TFT interval width (or stop/target fallback).
 - Defaults: 1% risk/trade, 3% daily loss limit, 10% portfolio heat, capped open positions.
 - Drawdown- and regime-based weight scaling.
@@ -82,6 +86,8 @@ MAX_RISK_PER_TRADE=0.01
 MAX_DAILY_LOSS_PCT=0.03
 WORKER_POLL_MINUTES=60
 UNIVERSE=AAPL,MSFT,NVDA,SPY,QQQ
+DECISION_MEMORY_ENABLED=true
+DECISION_MEMORY_HOLDING_BARS=5
 DSI_BASE_URL=https://...      # HTTPS required outside dev
 DSI_EMAIL=...
 DSI_PASSWORD=...
@@ -123,9 +129,10 @@ tests/  scripts/  docs/  Dockerfile  docker-compose.yml
 3. Get PPO/DQN actions with dynamic weights; pull recent external signals and market regime.
 4. Pick best rule-based strategy via live backtest.
 5. Combine via weighted-agreement scoring, then run adversarial review for agreement, strategy, and regime conflicts.
-6. Convert the result into a five-tier rating and risk flags before sizing.
-7. Size with ATR + TFT interval (or DSI stop/target fallback); submit Alpaca bracket orders.
-8. Log to Supabase (JSONL fallback); retrain local models nightly.
+6. Resolve prior decision-memory entries once enough future bars exist, then assess whether similar setups helped or hurt alpha.
+7. Convert the result into a five-tier rating and risk flags before sizing.
+8. Size with ATR + TFT interval (or DSI stop/target fallback); submit Alpaca bracket orders.
+9. Log to Supabase (JSONL fallback); retrain local models nightly.
 
 ## Safety
 

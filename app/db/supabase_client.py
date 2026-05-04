@@ -437,6 +437,7 @@ class TradeRepository:
         trades = self.recent_trades(limit=20)
         weights = self.latest_model_weights()
         learning = self.learning_progress(limit=20)
+        decision_memory = self.recent_decision_memory(limit=20, status=None)
         equity_curve = self.equity_curve(limit=200)
         worker_status = self.read_runtime_state("worker_status")
         model_performance = self.read_runtime_state("model_performance")
@@ -456,6 +457,7 @@ class TradeRepository:
             "model_weights": weights,
             "model_performance": model_performance,
             "learning_events": learning,
+            "decision_memory": decision_memory,
             "equity_curve": equity_curve,
             "worker_status": worker_status,
         }
