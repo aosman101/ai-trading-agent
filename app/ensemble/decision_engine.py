@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Dict, Iterable
+from typing import Any, Dict, Iterable
 
 from app.config import get_settings
 from app.types import EnsembleDecision, ModelSignal, StrategySignal
@@ -123,6 +123,114 @@ class EnsembleDecisionEngine:
         magnitude = clamp(raw_score if raw_score > 0 else confidence, 0.0, 1.0)
         return float(direction_multiplier * magnitude * confidence)
 
+    @staticmethod
+    def _unique_flags(flags: list[str]) -> list[str]:
+        return list(dict.fromkeys(flags))
+
+    def _portfolio_rating(self, direction: str, confidence: float, weighted_score: float) -> str:
+        strong_confidence = max(0.75, self.settings.min_confidence_to_trade + 0.15)
+        strong_score = 0.35
+        if direction == "long":
+            if confidence >= strong_confidence and abs(weighted_score) >= strong_score:
+                return "buy"
+            return "overweight"
+        if direction == "short":
+            if confidence >= strong_confidence and abs(weighted_score) >= strong_score:
+                return "sell"
+            return "underweight"
+        return "hold"
+
+    def _adversarial_review(
+        self,
+        *,
+        model_signals: list[ModelSignal],
+        contributions: dict[str, float],
+        weights: dict[str, float],
+        selected_strategy: StrategySignal | None,
+        regime: str | None,
+        weighted_score: float,
+        agreement_ratio: float,
+        active_weight: float,
+    ) -> dict[str, Any]:
+        """Deterministic bull/bear/risk review inspired by multi-agent debate.
+
+        TradingAgents uses separate bull, bear, trader, and risk agents before a
+        portfolio manager makes the final call. This local equivalent keeps the
+        system dependency-free while forcing every trade idea through adversarial
+        checks before the risk manager sizes it.
+        """
+        proposed_direction = "flat"
+        if weighted_score > 0:
+            proposed_direction = "long"
+        elif weighted_score < 0:
+            proposed_direction = "short"
+
+        bull_evidence = float(sum(max(value, 0.0) for value in contributions.values()))
+        bear_evidence = float(abs(sum(min(value, 0.0) for value in contributions.values())))
+        active_signals = [signal for signal in model_signals if signal.direction != "flat"]
+        active_count = len(active_signals)
+        min_active = max(1, int(self.settings.min_active_model_signals))
+        min_agreement = clamp(float(self.settings.min_directional_agreement), 0.0, 1.0)
+
+        risk_flags: list[str] = []
+        risk_multiplier = 1.0
+
+        if proposed_direction != "flat" and active_count < min_active:
+            risk_flags.append(f"Fewer than {min_active} active non-flat model signals")
+            risk_multiplier *= 0.65
+
+        if proposed_direction != "flat" and active_weight > 0 and agreement_ratio < min_agreement:
+            risk_flags.append(f"Directional agreement below {min_agreement:.0%}")
+            risk_multiplier *= 0.65
+
+        if selected_strategy is not None and proposed_direction != "flat":
+            if selected_strategy.direction == proposed_direction:
+                risk_multiplier *= 1.05
+            elif selected_strategy.direction == "flat":
+                risk_flags.append("Selected strategy is flat while models propose a trade")
+                risk_multiplier *= 0.90
+            else:
+                risk_flags.append("Selected strategy conflicts with model direction")
+                risk_multiplier *= 0.80
+
+        if regime and proposed_direction != "flat":
+            if proposed_direction == "long" and regime.startswith("bear_trend"):
+                risk_flags.append("Long setup conflicts with bear-trend regime")
+                risk_multiplier *= 0.75
+            elif proposed_direction == "short" and regime.startswith("bull_trend"):
+                risk_flags.append("Short setup conflicts with bull-trend regime")
+                risk_multiplier *= 0.75
+            if regime.endswith("high_vol"):
+                risk_flags.append("High-volatility regime increases execution risk")
+                risk_multiplier *= 0.90
+
+        risk_veto = (
+            proposed_direction != "flat"
+            and (
+                active_count < min_active
+                or (active_weight > 0 and agreement_ratio < min_agreement)
+            )
+        )
+        if risk_veto:
+            risk_flags.append("Risk review vetoed trade setup")
+
+        long_weight = sum(weights.get(signal.name, 0.0) for signal in active_signals if signal.direction == "long")
+        short_weight = sum(weights.get(signal.name, 0.0) for signal in active_signals if signal.direction == "short")
+
+        return {
+            "proposed_direction": proposed_direction,
+            "bull_evidence": round(bull_evidence, 6),
+            "bear_evidence": round(bear_evidence, 6),
+            "active_model_signals": active_count,
+            "active_weight": round(float(active_weight), 6),
+            "long_weight": round(float(long_weight), 6),
+            "short_weight": round(float(short_weight), 6),
+            "agreement_ratio": round(float(agreement_ratio), 6),
+            "risk_multiplier": round(float(clamp(risk_multiplier, 0.0, 1.25)), 6),
+            "risk_veto": risk_veto,
+            "risk_flags": self._unique_flags(risk_flags),
+        }
+
     def combine(
         self,
         symbol: str,
@@ -175,11 +283,32 @@ class EnsembleDecisionEngine:
             confidence = raw_confidence
         confidence = clamp(confidence, 0.0, 1.0)
 
+        debate = self._adversarial_review(
+            model_signals=model_signals,
+            contributions=contributions,
+            weights=weights,
+            selected_strategy=selected_strategy,
+            regime=regime,
+            weighted_score=weighted_score,
+            agreement_ratio=agreement_ratio,
+            active_weight=active_weight,
+        )
+        confidence = clamp(confidence * float(debate["risk_multiplier"]), 0.0, 1.0)
+
         direction = "flat"
-        if confidence >= self.settings.min_confidence_to_trade and weighted_score > 0:
+        if (
+            not debate["risk_veto"]
+            and confidence >= self.settings.min_confidence_to_trade
+            and weighted_score > 0
+        ):
             direction = "long"
-        elif confidence >= self.settings.min_confidence_to_trade and weighted_score < 0:
+        elif (
+            not debate["risk_veto"]
+            and confidence >= self.settings.min_confidence_to_trade
+            and weighted_score < 0
+        ):
             direction = "short"
+        rating = self._portfolio_rating(direction, confidence, weighted_score)
 
         most_influential_model = None
         if contributions:
@@ -194,18 +323,22 @@ class EnsembleDecisionEngine:
             )
 
         explanation = (
-            f"Direction={direction}; score={weighted_score:.4f}; "
+            f"Direction={direction}; rating={rating}; score={weighted_score:.4f}; "
             f"influencer={most_influential_model or 'none'}; "
-            f"scope={primary_scope or 'uniform'}"
+            f"scope={primary_scope or 'uniform'}; "
+            f"risk_flags={len(debate['risk_flags'])}"
         )
 
         return EnsembleDecision(
             symbol=symbol,
             direction=direction,
+            rating=rating,
             confidence=float(confidence),
             weighted_score=weighted_score,
             weights=weights,
             contributions=contributions,
+            risk_flags=debate["risk_flags"],
+            debate=debate,
             selected_strategy=selected_strategy.strategy if selected_strategy else None,
             most_influential_model=most_influential_model,
             market_regime=regime,

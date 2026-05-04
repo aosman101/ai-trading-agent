@@ -9,6 +9,7 @@ from app.utils.time import utc_now
 
 
 Direction = Literal["long", "short", "flat"]
+PortfolioRating = Literal["buy", "overweight", "hold", "underweight", "sell"]
 
 
 class ModelSignal(BaseModel):
@@ -33,10 +34,13 @@ class StrategySignal(BaseModel):
 class EnsembleDecision(BaseModel):
     symbol: str
     direction: Direction = "flat"
+    rating: PortfolioRating = "hold"
     confidence: float = 0.0
     weighted_score: float = 0.0
     weights: Dict[str, float] = Field(default_factory=dict)
     contributions: Dict[str, float] = Field(default_factory=dict)
+    risk_flags: list[str] = Field(default_factory=list)
+    debate: Dict[str, Any] = Field(default_factory=dict)
     selected_strategy: Optional[str] = None
     most_influential_model: Optional[str] = None
     market_regime: Optional[str] = None

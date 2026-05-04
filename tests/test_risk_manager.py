@@ -152,6 +152,26 @@ class TestBuildTradePlan:
         assert plan.approved is False
         assert any("shorting" in r.lower() for r in plan.reasons)
 
+    def test_adversarial_review_veto_rejects_trade(self, risk_manager):
+        decision = _make_decision(
+            direction="long",
+            confidence=0.80,
+            risk_flags=["Risk review vetoed trade setup"],
+            debate={"risk_veto": True},
+        )
+        plan = risk_manager.build_trade_plan(
+            symbol="AAPL",
+            decision=decision,
+            price=150.0,
+            atr=3.0,
+            interval_width=2.0,
+            equity=100_000.0,
+            current_daily_pnl=0.0,
+        )
+        assert plan.approved is False
+        assert any("adversarial" in r.lower() for r in plan.reasons)
+        assert plan.metadata["decision_risk_flags"] == ["Risk review vetoed trade setup"]
+
     def test_portfolio_heat_cap(self, risk_manager):
         decision = _make_decision(direction="long", confidence=1.0)
         plan = risk_manager.build_trade_plan(

@@ -13,9 +13,10 @@
 
 ```
 Market + News ─▶ Features ─▶ ┌ DSI (NHITS/TFT/LightGBM) ┐
-                             ├ FinBERT sentiment        ├─▶ Ensemble ─▶ Risk ─▶ Alpaca ─▶ Supabase/JSONL
+                             ├ FinBERT sentiment        ├─▶ Ensemble ─▶ Adversarial Review
                              ├ PPO / DQN (RL)           │
                              └ External signals         ┘
+                                                              └─▶ Risk ─▶ Alpaca ─▶ Supabase/JSONL
 ```
 
 ## Models
@@ -36,6 +37,9 @@ Five rule-based strategies compete via live backtest performance: **Momentum**, 
 
 ## Risk Management
 
+- Deterministic bull/bear/risk review inspired by multi-agent trading desks:
+  trades need enough active model agreement before sizing.
+- Five-tier portfolio ratings: buy, overweight, hold, underweight, sell.
 - ATR-based stops combined with DSI TFT interval width (or stop/target fallback).
 - Defaults: 1% risk/trade, 3% daily loss limit, 10% portfolio heat, capped open positions.
 - Drawdown- and regime-based weight scaling.
@@ -118,9 +122,10 @@ tests/  scripts/  docs/  Dockerfile  docker-compose.yml
 2. Pull DSI forecasts (with fallback observability) and local iTransformer if enabled.
 3. Get PPO/DQN actions with dynamic weights; pull recent external signals and market regime.
 4. Pick best rule-based strategy via live backtest.
-5. Combine via weighted-agreement scoring scaled by drawdown + regime.
-6. Size with ATR + TFT interval (or DSI stop/target fallback); submit Alpaca bracket orders.
-7. Log to Supabase (JSONL fallback); retrain local models nightly.
+5. Combine via weighted-agreement scoring, then run adversarial review for agreement, strategy, and regime conflicts.
+6. Convert the result into a five-tier rating and risk flags before sizing.
+7. Size with ATR + TFT interval (or DSI stop/target fallback); submit Alpaca bracket orders.
+8. Log to Supabase (JSONL fallback); retrain local models nightly.
 
 ## Safety
 

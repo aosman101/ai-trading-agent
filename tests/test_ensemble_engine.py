@@ -133,6 +133,56 @@ class TestCombine:
         assert decision.market_regime == "bull_trend_low_vol"
         assert decision.weight_scope == "regime:bull_trend_low_vol"
 
+    def test_strong_unanimous_long_gets_buy_rating(self, engine):
+        signals = [
+            _model_signal("nhits", direction="long", score=0.9, confidence=0.95),
+            _model_signal("lightgbm", direction="long", score=0.8, confidence=0.95),
+            _model_signal("tft", direction="long", score=0.85, confidence=0.95),
+        ]
+        decision = engine.combine(symbol="AAPL", model_signals=signals)
+        assert decision.direction == "long"
+        assert decision.rating == "buy"
+        assert decision.debate["bull_evidence"] > decision.debate["bear_evidence"]
+
+    def test_single_active_signal_is_vetoed_by_review(self, engine):
+        signals = [
+            _model_signal("nhits", direction="long", score=0.9, confidence=0.95),
+            _model_signal("lightgbm", direction="flat", score=0.0, confidence=0.0),
+            _model_signal("tft", direction="flat", score=0.0, confidence=0.0),
+        ]
+        decision = engine.combine(symbol="AAPL", model_signals=signals)
+        assert decision.direction == "flat"
+        assert decision.rating == "hold"
+        assert decision.debate["risk_veto"] is True
+        assert any("fewer than" in flag.lower() for flag in decision.risk_flags)
+
+    def test_strategy_conflict_penalizes_review(self, engine):
+        signals = [
+            _model_signal("nhits", direction="long", score=0.7, confidence=0.9),
+            _model_signal("lightgbm", direction="long", score=0.7, confidence=0.9),
+        ]
+        aligned = engine.combine(
+            symbol="AAPL",
+            model_signals=signals,
+            selected_strategy=_strategy_signal(direction="long", confidence=0.9),
+        )
+        conflicted = engine.combine(
+            symbol="AAPL",
+            model_signals=signals,
+            selected_strategy=_strategy_signal(direction="short", confidence=0.9),
+        )
+        assert conflicted.confidence < aligned.confidence
+        assert any("strategy conflicts" in flag.lower() for flag in conflicted.risk_flags)
+
+    def test_adverse_regime_adds_risk_flags(self, engine):
+        signals = [
+            _model_signal("nhits", direction="long", score=0.7, confidence=0.9),
+            _model_signal("lightgbm", direction="long", score=0.7, confidence=0.9),
+        ]
+        decision = engine.combine(symbol="AAPL", model_signals=signals, regime="bear_trend_high_vol")
+        assert any("bear-trend" in flag.lower() for flag in decision.risk_flags)
+        assert any("high-volatility" in flag.lower() for flag in decision.risk_flags)
+
     def test_agreement_boosts_confidence(self, engine):
         unanimous = [
             _model_signal("a", direction="long", score=0.3, confidence=0.6),

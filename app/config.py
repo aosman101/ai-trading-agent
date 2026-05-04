@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     lightgbm_horizon: int = 5
 
     min_confidence_to_trade: float = 0.55
+    min_active_model_signals: int = 2
+    min_directional_agreement: float = 0.60
     max_risk_per_trade: float = 0.01
     max_daily_loss_pct: float = 0.03
     max_portfolio_heat: float = 0.10

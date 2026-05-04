@@ -450,9 +450,16 @@ class TradingOrchestrator:
             lines.append("Selected strategy: none passed deployment thresholds")
         lines.append("")
 
-        lines.append(f"Ensemble decision: {decision.direction} (score={decision.weighted_score:+.4f}, conf={decision.confidence:.2f})")
+        lines.append(
+            f"Ensemble decision: {decision.direction} / {decision.rating} "
+            f"(score={decision.weighted_score:+.4f}, conf={decision.confidence:.2f})"
+        )
         lines.append(f"Most influential: {decision.most_influential_model or 'none'}")
         lines.append(f"Weight scope: {decision.weight_scope or 'uniform'}")
+        if decision.risk_flags:
+            lines.append("Risk review flags:")
+            for flag in decision.risk_flags:
+                lines.append(f"  - {flag}")
         lines.append("")
 
         if traded:
@@ -485,9 +492,12 @@ class TradingOrchestrator:
                 "body": body,
                 "payload": {
                     "direction": decision.direction,
+                    "rating": decision.rating,
                     "confidence": decision.confidence,
                     "weighted_score": decision.weighted_score,
                     "market_regime": market_regime,
+                    "risk_flags": decision.risk_flags,
+                    "adversarial_review": decision.debate,
                     "risk_plan_approved": risk_plan.approved,
                     "quantity": risk_plan.quantity,
                     "entry_price": risk_plan.entry_price,
@@ -554,9 +564,12 @@ class TradingOrchestrator:
                 "most_influential_model": decision.most_influential_model,
                 "explanation": decision.explanation,
                 "payload": {
+                    "rating": decision.rating,
                     "weights": decision.weights,
                     "weight_scope": decision.weight_scope,
                     "market_regime": decision.market_regime,
+                    "risk_flags": decision.risk_flags,
+                    "adversarial_review": decision.debate,
                     "contributions": decision.contributions,
                     "model_signals": [signal.model_dump() for signal in model_signals],
                     "selected_strategy": selected_strategy.model_dump() if selected_strategy else None,
@@ -760,6 +773,8 @@ class TradingOrchestrator:
             "current_portfolio_heat": current_portfolio_heat,
             "current_strategy": decision.selected_strategy,
             "most_influential_model": decision.most_influential_model,
+            "portfolio_rating": decision.rating,
+            "risk_flags": decision.risk_flags,
             "market_regime": decision.market_regime,
             "weight_scope": decision.weight_scope,
             "dsi_status": dsi_status,

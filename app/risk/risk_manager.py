@@ -76,6 +76,8 @@ class RiskManager:
             reasons.append("Decision is flat, so no trade should be placed")
         if decision.direction == "short" and not self.settings.allow_shorting:
             reasons.append("Shorting is disabled in settings")
+        if bool(decision.debate.get("risk_veto")):
+            reasons.append("Adversarial risk review vetoed the trade setup")
 
         # --- Drawdown circuit breaker ---
         effective_peak = peak_equity if peak_equity and peak_equity > 0 else equity
@@ -151,6 +153,9 @@ class RiskManager:
                 "stop_distance": stop_distance,
                 "current_open_notional": current_open_notional,
                 "projected_portfolio_heat": projected_heat,
+                "decision_rating": decision.rating,
+                "decision_risk_flags": list(decision.risk_flags),
+                "adversarial_review": dict(decision.debate),
                 "notes": notes,
             },
         )
